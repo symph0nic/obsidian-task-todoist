@@ -14,9 +14,13 @@ main.js
 
 # Exclude sourcemaps
 *.map
+release/
 
 # obsidian
 data.json
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
+
+# Exclude local copy script
+update-plugin-todoist.ps1

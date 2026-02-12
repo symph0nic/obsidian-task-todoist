@@ -1,0 +1,39 @@
+filters:
+  and:
+    - file.tags.contains("tasks")
+views:
+  - type: table
+    name: Today
+    filters:
+      and:
+        - task_status != "done"
+        - todoist_due == today()
+    order:
+      - file.name
+      - task_title
+      - task_done
+      - task_status
+      - todoist_due
+      - todoist_project_name
+  - type: table
+    name: All Tasks
+    order:
+      - file.name
+      - task_title
+      - task_done
+      - task_status
+      - todoist_due
+      - todoist_project_name
+      - todoist_sync_status
+  - type: table
+    name: Inbox
+    filters:
+      and:
+        - todoist_project_name == "Inbox"
+        - task_status != "done"
+    order:
+      - file.name
+      - task_title
+      - task_done
+      - task_status
+      - todoist_due

@@ -1,0 +1,224 @@
+import { TaskNoteRepository, type SyncedTaskEntry } from './task-note-repository';
+import type { TaskTodoistSettings } from './settings';
+import { filterImportableItems } from './import-rules';
+import { TodoistClient } from './todoist-client';
+import type { TodoistItem } from './todoist-client';
+import type { App } from 'obsidian';
+import { syncLinkedChecklistStates } from './linked-checklist-sync';
+
+	export interface SyncRunResult {
+	ok: boolean;
+	message: string;
+	created?: number;
+	updated?: number;
+	imported?: number;
+	missingHandled?: number;
+	pushedUpdates?: number;
+	linkedChecklistUpdates?: number;
+}
+
+export class SyncService {
+	private readonly app: App;
+	private readonly settings: TaskTodoistSettings;
+	private readonly token: string;
+
+	constructor(app: App, settings: TaskTodoistSettings, token: string) {
+		this.app = app;
+		this.settings = settings;
+		this.token = token;
+	}
+
+	async runImportSync(): Promise<SyncRunResult> {
+		try {
+			const todoistClient = new TodoistClient(this.token);
+			const repository = new TaskNoteRepository(this.app, this.settings);
+			let snapshot = await todoistClient.fetchSyncSnapshot();
+			const projectIdByName = new Map(snapshot.projects.map((project) => [project.name.toLowerCase(), project.id]));
+
+			const pendingLocalCreates = await repository.listPendingLocalCreates();
+			for (const pending of pendingLocalCreates) {
+				const resolvedProjectId = resolveProjectId(pending.projectId, pending.projectName, projectIdByName);
+				const resolvedSectionId = resolveSectionId(
+					pending.sectionId,
+					pending.sectionName,
+					resolvedProjectId,
+					snapshot,
+				);
+				const { dueDate, dueString } = resolveDue(pending.dueRaw);
+				const createdTodoistId = await todoistClient.createTask({
+					content: pending.title,
+					description: pending.description,
+					projectId: resolvedProjectId,
+					sectionId: resolvedSectionId,
+					priority: pending.priority,
+					labels: pending.labels,
+					dueDate,
+					dueString,
+				});
+				if (pending.isDone) {
+					await todoistClient.updateTask({
+						id: createdTodoistId,
+						content: pending.title,
+						description: pending.description,
+						isDone: true,
+						projectId: resolvedProjectId,
+						sectionId: resolvedSectionId,
+						dueDate,
+						dueString,
+					});
+				}
+				await repository.markLocalCreateSynced(pending.file, createdTodoistId);
+			}
+
+			const pendingLocalUpdates = await repository.listPendingLocalUpdates();
+			for (const pending of pendingLocalUpdates) {
+				const resolvedProjectId = resolveProjectId(pending.projectId, pending.projectName, projectIdByName);
+				const resolvedSectionId = resolveSectionId(
+					pending.sectionId,
+					pending.sectionName,
+					resolvedProjectId,
+					snapshot,
+				);
+				const { dueDate, dueString } = resolveDue(pending.dueRaw);
+				await todoistClient.updateTask({
+					id: pending.todoistId,
+					content: pending.title,
+					description: pending.description,
+					isDone: pending.isDone,
+					projectId: resolvedProjectId,
+					sectionId: resolvedSectionId,
+					dueDate,
+					dueString,
+					clearDue: !dueDate && !dueString,
+				});
+				await repository.markLocalUpdateSynced(pending.file);
+			}
+
+			snapshot = await todoistClient.fetchSyncSnapshot();
+			const activeItemById = new Map(snapshot.items.map((item) => [item.id, item]));
+
+			const importableItems = filterImportableItems(
+				snapshot.items,
+				snapshot.projects,
+				this.settings,
+				snapshot.userId,
+			);
+			const importableWithAncestors = includeAncestorTasks(importableItems, snapshot.items);
+
+			const projectNameById = new Map(snapshot.projects.map((project) => [project.id, project.name]));
+			const sectionNameById = new Map(snapshot.sections.map((section) => [section.id, section.name]));
+
+			const existingSyncedTasks = await repository.listSyncedTasks();
+
+			const itemsToUpsertById = new Map(importableWithAncestors.map((item) => [item.id, item]));
+			for (const entry of existingSyncedTasks) {
+				const remoteItem = activeItemById.get(entry.todoistId);
+				if (remoteItem) {
+					itemsToUpsertById.set(remoteItem.id, remoteItem);
+				}
+			}
+
+			const taskResult = await repository.syncItems(Array.from(itemsToUpsertById.values()), {
+				projectNameById,
+				sectionNameById,
+			});
+
+			const missingEntries = findMissingEntries(existingSyncedTasks, activeItemById);
+			const missingHandled = await repository.applyMissingRemoteTasks(missingEntries, this.settings.archiveMode);
+			const linkedChecklistUpdates = await syncLinkedChecklistStates(this.app);
+
+			const ancestorCount = importableWithAncestors.length - importableItems.length;
+			const message = `Synced ${importableItems.length} importable task(s) (+${ancestorCount} ancestors): ${pendingLocalCreates.length} created remotely, ${pendingLocalUpdates.length} updates pushed, ${taskResult.created} created, ${taskResult.updated} updated, ${missingHandled} missing handled, ${linkedChecklistUpdates} checklist lines refreshed.`;
+			return {
+				ok: true,
+				message,
+				imported: importableWithAncestors.length,
+				created: taskResult.created,
+				updated: taskResult.updated,
+				missingHandled,
+				pushedUpdates: pendingLocalUpdates.length,
+				linkedChecklistUpdates,
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unknown sync error';
+			return {
+				ok: false,
+				message: `Todoist sync failed: ${message}`,
+			};
+		}
+	}
+}
+
+function findMissingEntries(
+	existingSyncedTasks: SyncedTaskEntry[],
+	activeItemById: Map<string, unknown>,
+): SyncedTaskEntry[] {
+	return existingSyncedTasks.filter((entry) => !activeItemById.has(entry.todoistId));
+}
+
+function includeAncestorTasks(
+	baseItems: TodoistItem[],
+	allItems: TodoistItem[],
+): TodoistItem[] {
+	const allById = new Map(allItems.map((item) => [item.id, item]));
+	const selectedById = new Map(baseItems.map((item) => [item.id, item]));
+
+	for (const item of baseItems) {
+		let parentId = item.parent_id ?? null;
+		const seen = new Set<string>();
+		while (parentId && !seen.has(parentId)) {
+			seen.add(parentId);
+			const parent = allById.get(parentId);
+			if (!parent) {
+				break;
+			}
+			selectedById.set(parent.id, parent);
+			parentId = parent.parent_id ?? null;
+		}
+	}
+
+	return Array.from(selectedById.values());
+}
+
+function resolveProjectId(
+	projectId: string | undefined,
+	projectName: string | undefined,
+	projectIdByName: Map<string, string>,
+): string | undefined {
+	if (projectId?.trim()) {
+		return projectId.trim();
+	}
+	if (!projectName?.trim()) {
+		return undefined;
+	}
+	return projectIdByName.get(projectName.trim().toLowerCase());
+}
+
+function resolveSectionId(
+	sectionId: string | undefined,
+	sectionName: string | undefined,
+	projectId: string | undefined,
+	snapshot: { sections: Array<{ id: string; name: string; project_id: string }> },
+): string | undefined {
+	if (sectionId?.trim()) {
+		return sectionId.trim();
+	}
+	if (!sectionName?.trim() || !projectId) {
+		return undefined;
+	}
+	const section = snapshot.sections.find(
+		(item) => item.project_id === projectId && item.name.toLowerCase() === sectionName.trim().toLowerCase(),
+	);
+	return section?.id;
+}
+
+function resolveDue(dueRaw: string | undefined): { dueDate?: string; dueString?: string } {
+	const due = dueRaw?.trim() ?? '';
+	if (!due) {
+		return {};
+	}
+	if (/^\d{4}-\d{2}-\d{2}$/.test(due)) {
+		return { dueDate: due };
+	}
+	return { dueString: due };
+}

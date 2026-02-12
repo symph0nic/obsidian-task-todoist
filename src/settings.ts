@@ -1,36 +1,36 @@
-import {App, PluginSettingTab, Setting} from "obsidian";
-import MyPlugin from "./main";
+export const DEFAULT_TODOIST_TOKEN_SECRET_NAME = 'todoist-api';
 
-export interface MyPluginSettings {
-	mySetting: string;
+export type ArchiveMode = 'none' | 'move-to-archive-folder' | 'mark-local-done';
+export type ImportProjectScope = 'all-projects' | 'allow-list-by-name';
+
+export interface TaskTodoistSettings {
+	tasksFolderPath: string;
+	defaultTaskTag: string;
+	autoSyncEnabled: boolean;
+	autoSyncIntervalMinutes: number;
+	showScheduledSyncNotices: boolean;
+	archiveMode: ArchiveMode;
+	archiveFolderPath: string;
+	autoImportEnabled: boolean;
+	autoImportProjectScope: ImportProjectScope;
+	autoImportAllowedProjectNames: string;
+	autoImportRequiredLabel: string;
+	autoImportAssignedToMeOnly: boolean;
+	todoistTokenSecretName: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
-}
+export const DEFAULT_SETTINGS: TaskTodoistSettings = {
+	tasksFolderPath: 'Tasks',
+	defaultTaskTag: 'tasks',
+	autoSyncEnabled: true,
+	autoSyncIntervalMinutes: 5,
+	showScheduledSyncNotices: false,
+	archiveMode: 'move-to-archive-folder',
+	archiveFolderPath: 'Tasks/_archive',
+	autoImportEnabled: true,
+	autoImportProjectScope: 'allow-list-by-name',
+	autoImportAllowedProjectNames: '',
+	autoImportRequiredLabel: 'obsidian',
+	autoImportAssignedToMeOnly: true,
+	todoistTokenSecretName: DEFAULT_TODOIST_TOKEN_SECRET_NAME,
+};

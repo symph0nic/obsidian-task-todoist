@@ -1,11 +1,11 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
+	"id": "obsidian-task-todoist",
+	"name": "Task Notes & Todoist Sync",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"minAppVersion": "1.11.4",
+	"description": "Allows task syncing from Todoist, with tasks created as notes.",
+	"author": "symph0nic",
+	"authorUrl": "",
+	"fundingUrl": "",
 	"isDesktopOnly": false
 }

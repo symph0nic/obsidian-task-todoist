@@ -1,99 +1,474 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Editor, MarkdownView, Notice, Plugin, TAbstractFile, TFile, normalizePath } from 'obsidian';
+import {
+	DEFAULT_TODOIST_TOKEN_SECRET_NAME,
+	DEFAULT_SETTINGS,
+	type TaskTodoistSettings,
+} from './settings';
+import { TaskTodoistSettingTab } from './settings-tab';
+import { TodoistClient } from './todoist-client';
+import { SyncService } from './sync-service';
+import { CreateTaskModal } from './create-task-modal';
+import { createLocalTaskNote, type LocalTaskNoteInput } from './task-note-factory';
+import { registerInlineTaskConverter } from './inline-task-converter';
+import { createTaskConvertOverlayExtension } from './editor-task-convert-overlay';
+import { formatDueForDisplay, parseInlineTaskDirectives } from './task-directives';
+import { applyStandardTaskFrontmatter, setTaskStatus } from './task-frontmatter';
 
-// Remember to rename these classes and interfaces!
+export default class TaskTodoistPlugin extends Plugin {
+	settings: TaskTodoistSettings;
+	private todoistApiToken: string | null = null;
+	private lastConnectionCheckMessage = 'No check run yet.';
+	private lastSyncMessage = 'No sync run yet.';
+	private readonly recentTaskMetaByLink = new Map<string, {
+		projectName?: string;
+		sectionName?: string;
+		dueDate?: string;
+		dueString?: string;
+		isRecurring?: boolean;
+	}>();
+	private scheduledSyncIntervalId: number | null = null;
+	private syncInProgress = false;
+	private syncQueued = false;
+	private static readonly UNCHECKED_TASK_LINE_REGEX = /^(\s*[-*+]\s+\[\s\]\s+)(.+)$/;
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
-	async onload() {
+	async onload(): Promise<void> {
 		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
+		await this.loadTodoistApiToken();
+		this.addSettingTab(new TaskTodoistSettingTab(this.app, this));
+		this.registerCommands();
+		this.registerVaultTaskDirtyTracking();
+		registerInlineTaskConverter(this);
+		this.registerEditorExtension(createTaskConvertOverlayExtension(this));
+		this.configureScheduledSync();
 	}
 
-	onunload() {
+	async loadSettings(): Promise<void> {
+		const loaded = await this.loadData() as Partial<TaskTodoistSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
-	}
-
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	isSecretStorageAvailable(): boolean {
+		return Boolean(this.app.secretStorage);
+	}
+
+	getTodoistApiToken(): string | null {
+		return this.todoistApiToken;
+	}
+
+	getLastConnectionCheckMessage(): string {
+		return this.lastConnectionCheckMessage;
+	}
+
+	getLastSyncMessage(): string {
+		return this.lastSyncMessage;
+	}
+
+	async testTodoistConnection(): Promise<{ ok: boolean; message: string }> {
+		await this.loadTodoistApiToken();
+		const token = this.todoistApiToken;
+
+		if (!token) {
+			const result = {
+				ok: false,
+				message: 'No todoist API token is configured.',
+			};
+			this.setLastConnectionCheck(result.message);
+			return result;
+		}
+
+		try {
+			const client = new TodoistClient(token);
+			const result = await client.testConnection();
+			this.setLastConnectionCheck(result.message);
+			return result;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unknown error';
+			const result = {
+				ok: false,
+				message: `Todoist connection check failed: ${message}`,
+			};
+			this.setLastConnectionCheck(result.message);
+			return result;
+		}
+	}
+
+	async runImportSync(): Promise<{ ok: boolean; message: string }> {
+		if (this.syncInProgress) {
+			this.syncQueued = true;
+			return { ok: false, message: 'Sync already running. Queued another run.' };
+		}
+
+		this.syncInProgress = true;
+		await this.loadTodoistApiToken();
+		const token = this.todoistApiToken;
+		if (!token) {
+			const result = { ok: false, message: 'No todoist API token is configured.' };
+			this.setLastSync(result.message);
+			this.finishSyncRun();
+			return result;
+		}
+
+		try {
+			const service = new SyncService(this.app, this.settings, token);
+			const result = await service.runImportSync();
+			this.setLastSync(result.message);
+			return result;
+		} finally {
+			this.finishSyncRun();
+		}
+	}
+
+	async createTaskNote(input: LocalTaskNoteInput) {
+		const created = await createLocalTaskNote(this.app, this.settings, input);
+		const linkTarget = created.path.replace(/\.md$/i, '');
+		this.recentTaskMetaByLink.set(linkTarget, {
+			projectName: input.todoistProjectName?.trim() || undefined,
+			sectionName: input.todoistSectionName?.trim() || undefined,
+			dueDate: input.todoistDueDate?.trim() || undefined,
+			dueString: input.todoistDueString?.trim() || undefined,
+			isRecurring: Boolean(input.todoistDueString?.trim()),
+		});
+		return created;
+	}
+
+	openCreateTaskModal(initialTitle = ''): void {
+		new CreateTaskModal(this.app, this, initialTitle).open();
+	}
+
+	async convertEditorChecklistLineToTaskNote(editor: Editor): Promise<{ ok: boolean; message: string }> {
+		const lineNumber = editor.getCursor().line;
+		return this.convertChecklistLineByEditorLine(editor, lineNumber);
+	}
+
+	async convertChecklistLineInActiveEditor(lineNumberOneBased: number, expectedTitle?: string): Promise<void> {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor = view?.editor;
+		if (!editor) {
+			new Notice('No active Markdown editor found.', 5000);
+			return;
+		}
+
+		const zeroBasedLine = Math.max(0, lineNumberOneBased - 1);
+		const line = editor.getLine(zeroBasedLine);
+		const match = line.match(TaskTodoistPlugin.UNCHECKED_TASK_LINE_REGEX);
+		if (!match) {
+			return;
+		}
+
+		const title = normalizeTaskText(match[2] ?? '');
+		if (!title || (expectedTitle && normalizeTaskText(expectedTitle) !== title)) {
+			return;
+		}
+
+		const result = await this.convertChecklistLineByEditorLine(editor, zeroBasedLine);
+		const prefix = result.ok ? 'Success:' : 'Failed:';
+		new Notice(`${prefix} ${result.message}`, 5000);
+	}
+
+
+	private async convertChecklistLineByEditorLine(editor: Editor, lineNumber: number): Promise<{ ok: boolean; message: string }> {
+		const line = editor.getLine(lineNumber);
+		const match = line.match(TaskTodoistPlugin.UNCHECKED_TASK_LINE_REGEX);
+		if (!match) {
+			return {
+				ok: false,
+				message: 'Current line is not an unchecked checklist task.',
+			};
+		}
+
+		const parsed = parseInlineTaskDirectives(normalizeTaskText(match[2] ?? ''));
+		if (!parsed.title) {
+			return {
+				ok: false,
+				message: 'Task title is empty.',
+			};
+		}
+
+		const created = await this.createTaskNote({
+			title: parsed.title,
+			description: '',
+			todoistSync: true,
+			todoistProjectName: parsed.projectName,
+			todoistSectionName: parsed.sectionName,
+			todoistDueDate: parsed.recurrenceRaw ? '' : parsed.dueRaw,
+			todoistDueString: parsed.recurrenceRaw,
+		});
+		const linkTarget = created.path.replace(/\.md$/i, '');
+		editor.setLine(lineNumber, `${match[1]}[[${linkTarget}|${parsed.title}]]`);
+		return {
+			ok: true,
+			message: `Converted task to note: ${created.basename}`,
+		};
+	}
+
+	async updateLinkedTaskNoteStatusByLink(linkTarget: string, isDone: boolean): Promise<void> {
+		const sourcePath = this.app.workspace.getActiveFile()?.path ?? '';
+		const taskFile = this.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+		if (!taskFile) {
+			return;
+		}
+
+		await this.app.fileManager.processFrontMatter(taskFile, (frontmatter) => {
+			const data = frontmatter as Record<string, unknown>;
+			applyStandardTaskFrontmatter(data, this.settings);
+			setTaskStatus(data, isDone ? 'done' : 'open');
+			data.local_updated_at = new Date().toISOString();
+			const todoistId = typeof data.todoist_id === 'string' ? data.todoist_id : '';
+			if (todoistId.trim()) {
+				data.todoist_sync_status = 'dirty_local';
+				if ('sync_status' in data) {
+					delete data.sync_status;
+				}
+			}
+		});
+	}
+
+	getLinkedTaskMetaSummary(linkTarget: string): string {
+		const sourcePath = this.app.workspace.getActiveFile()?.path ?? '';
+		const taskFile = this.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+		if (taskFile) {
+			const frontmatter = this.app.metadataCache.getFileCache(taskFile)?.frontmatter as Record<string, unknown> | undefined;
+			if (frontmatter) {
+				const projectName = typeof frontmatter.todoist_project_name === 'string' ? frontmatter.todoist_project_name.trim() : '';
+				const sectionName = typeof frontmatter.todoist_section_name === 'string' ? frontmatter.todoist_section_name.trim() : '';
+				const dueString = typeof frontmatter.todoist_due_string === 'string' ? frontmatter.todoist_due_string.trim() : '';
+				const dueDate = typeof frontmatter.todoist_due === 'string' ? frontmatter.todoist_due.trim() : '';
+				const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
+				const summary = buildMetaSummary(projectName, sectionName, dueDate, dueString, isRecurring);
+				if (summary) {
+					this.recentTaskMetaByLink.delete(linkTarget);
+					return summary;
+				}
+			}
+		}
+
+		const recent = this.recentTaskMetaByLink.get(linkTarget);
+		if (recent) {
+			return buildMetaSummary(
+				recent.projectName,
+				recent.sectionName,
+				recent.dueDate,
+				recent.dueString,
+				recent.isRecurring,
+			);
+		}
+
+		return '';
+	}
+
+	async updateTodoistTokenSecretName(secretName: string): Promise<void> {
+		const normalizedName = secretName.trim() || DEFAULT_TODOIST_TOKEN_SECRET_NAME;
+		this.settings.todoistTokenSecretName = normalizedName;
+		await this.saveSettings();
+		await this.loadTodoistApiToken();
+	}
+
+	async updateAutoSyncEnabled(enabled: boolean): Promise<void> {
+		this.settings.autoSyncEnabled = enabled;
+		await this.saveSettings();
+		this.configureScheduledSync();
+	}
+
+	async updateAutoSyncIntervalMinutes(minutes: number): Promise<void> {
+		const normalized = normalizeSyncInterval(minutes);
+		this.settings.autoSyncIntervalMinutes = normalized;
+		await this.saveSettings();
+		this.configureScheduledSync();
+	}
+
+	private async loadTodoistApiToken(): Promise<void> {
+		const secretName = this.settings.todoistTokenSecretName.trim();
+		if (!secretName) {
+			this.todoistApiToken = null;
+			return;
+		}
+
+		const token = this.app.secretStorage.getSecret(secretName);
+		this.todoistApiToken = token?.trim() || null;
+	}
+
+	private registerCommands(): void {
+		this.addCommand({
+			id: 'test-todoist-connection',
+			name: 'Test todoist connection',
+			callback: async () => {
+				const result = await this.testTodoistConnection();
+				const prefix = result.ok ? 'Success:' : 'Failed:';
+				new Notice(`${prefix} ${result.message}`, 6000);
+			},
+		});
+		this.addCommand({
+			id: 'sync-todoist-now',
+			name: 'Sync todoist now',
+			callback: async () => {
+				const result = await this.runImportSync();
+				const prefix = result.ok ? 'Success:' : 'Failed:';
+				new Notice(`${prefix} ${result.message}`, 8000);
+			},
+		});
+		this.addCommand({
+			id: 'create-task-note',
+			name: 'Create task note',
+			callback: () => {
+				this.openCreateTaskModal();
+			},
+		});
+		this.addCommand({
+			id: 'convert-checklist-item-to-task-note',
+			name: 'Convert checklist item to task note',
+			editorCallback: async (editor) => {
+				const result = await this.convertEditorChecklistLineToTaskNote(editor);
+				const prefix = result.ok ? 'Success:' : 'Failed:';
+				new Notice(`${prefix} ${result.message}`, 6000);
+			},
+		});
+	}
+
+	private setLastConnectionCheck(message: string): void {
+		const checkedAt = new Date().toLocaleString();
+		this.lastConnectionCheckMessage = `${message} (${checkedAt})`;
+	}
+
+	private setLastSync(message: string): void {
+		const syncedAt = new Date().toLocaleString();
+		this.lastSyncMessage = `${message} (${syncedAt})`;
+	}
+
+	private configureScheduledSync(): void {
+		if (this.scheduledSyncIntervalId !== null) {
+			window.clearInterval(this.scheduledSyncIntervalId);
+			this.scheduledSyncIntervalId = null;
+		}
+
+		if (!this.settings.autoSyncEnabled) {
+			return;
+		}
+
+		const intervalMs = normalizeSyncInterval(this.settings.autoSyncIntervalMinutes) * 60 * 1000;
+		this.scheduledSyncIntervalId = window.setInterval(() => {
+			void this.runScheduledSync();
+		}, intervalMs);
+		this.registerInterval(this.scheduledSyncIntervalId);
+	}
+
+	private async runScheduledSync(): Promise<void> {
+		const result = await this.runImportSync();
+		if (result.message.startsWith('Sync already running')) {
+			return;
+		}
+
+		if (this.settings.showScheduledSyncNotices) {
+			const prefix = result.ok ? 'Scheduled sync:' : 'Scheduled sync failed:';
+			new Notice(`${prefix} ${result.message}`, result.ok ? 3500 : 5000);
+			return;
+		}
+
+		if (!result.ok) {
+			new Notice(`Scheduled sync failed: ${result.message}`, 5000);
+		}
+	}
+
+	private finishSyncRun(): void {
+		this.syncInProgress = false;
+		if (this.syncQueued) {
+			this.syncQueued = false;
+			void this.runImportSync();
+		}
+	}
+
+	private registerVaultTaskDirtyTracking(): void {
+		this.registerEvent(this.app.vault.on('modify', (file) => {
+			void this.onVaultFileModified(file);
+		}));
+	}
+
+	private async onVaultFileModified(file: TAbstractFile): Promise<void> {
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			return;
+		}
+		if (this.syncInProgress) {
+			return;
+		}
+		if (!this.isTaskFilePath(file.path)) {
+			return;
+		}
+
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		if (!frontmatter) {
+			return;
+		}
+
+		const todoistSync = frontmatter.todoist_sync;
+		const todoistId = typeof frontmatter.todoist_id === 'string' ? frontmatter.todoist_id.trim() : '';
+		if (!(todoistSync === true || todoistSync === 'true') || !todoistId) {
+			return;
+		}
+
+		const currentStatus =
+			typeof frontmatter.todoist_sync_status === 'string'
+				? frontmatter.todoist_sync_status
+				: (typeof frontmatter.sync_status === 'string' ? frontmatter.sync_status : '');
+		if (currentStatus === 'dirty_local' || currentStatus === 'queued_local_create') {
+			return;
+		}
+
+		await this.app.fileManager.processFrontMatter(file, (frontmatterToMutate) => {
+			const data = frontmatterToMutate as Record<string, unknown>;
+			applyStandardTaskFrontmatter(data, this.settings);
+			data.todoist_sync_status = 'dirty_local';
+			data.local_updated_at = new Date().toISOString();
+			if ('sync_status' in data) {
+				delete data.sync_status;
+			}
+		});
+	}
+
+	private isTaskFilePath(path: string): boolean {
+		const taskFolder = normalizePath(this.settings.tasksFolderPath);
+		const taskPrefix = `${taskFolder}/`;
+		return path === taskFolder || path.startsWith(taskPrefix);
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+function normalizeTaskText(value: string): string {
+	return value.replace(/\s+/g, ' ').trim();
+}
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+function normalizeSyncInterval(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 5;
 	}
+	return Math.min(120, Math.max(1, Math.round(value)));
+}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+function buildMetaSummary(
+	projectName?: string,
+	sectionName?: string,
+	dueDate?: string,
+	dueString?: string,
+	isRecurring = false,
+): string {
+	const parts: string[] = [];
+	if (projectName) {
+		parts.push(`📁 ${projectName}`);
 	}
+	if (sectionName) {
+		parts.push(`🧭 ${sectionName}`);
+	}
+	if (isRecurring) {
+		parts.push(`🔁 ${dueString || 'recurring'}`);
+		if (dueDate) {
+			parts.push(`📅 ${formatDueForDisplay(dueDate)}`);
+		}
+	} else {
+		const dueRaw = dueString || dueDate;
+		if (dueRaw) {
+			parts.push(`📅 ${formatDueForDisplay(dueRaw)}`);
+		}
+	}
+	return parts.join(' • ');
 }
