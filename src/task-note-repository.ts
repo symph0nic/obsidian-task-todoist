@@ -114,6 +114,7 @@ export class TaskNoteRepository {
 			combinedIndex.set(todoistId, file);
 		}
 		await this.applyParentLinks(combinedIndex, pendingParents);
+		await this.applyChildMetadata(combinedIndex, pendingParents);
 
 		return { created, updated };
 	}
@@ -464,6 +465,48 @@ export class TaskNoteRepository {
 		}
 	}
 
+	private async applyChildMetadata(todoistIdIndex: Map<string, TFile>, assignments: ParentAssignment[]): Promise<void> {
+		const childLinksByParentTodoistId = new Map<string, string[]>();
+		for (const assignment of assignments) {
+			const parentFile = todoistIdIndex.get(assignment.parentTodoistId);
+			const childFile = todoistIdIndex.get(assignment.childTodoistId);
+			if (!parentFile || !childFile) {
+				continue;
+			}
+			const next = childLinksByParentTodoistId.get(assignment.parentTodoistId) ?? [];
+			next.push(toWikiLink(childFile.path));
+			childLinksByParentTodoistId.set(assignment.parentTodoistId, next);
+		}
+
+		for (const [todoistId, file] of todoistIdIndex) {
+			const desiredChildLinks = (childLinksByParentTodoistId.get(todoistId) ?? []).slice().sort((a, b) => a.localeCompare(b));
+			const desiredHasChildren = desiredChildLinks.length > 0;
+			const desiredChildCount = desiredChildLinks.length;
+
+			const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+			const currentHasChildren = toOptionalBoolean(frontmatter?.todoist_has_children) ?? false;
+			const currentChildCount = toOptionalNumber(frontmatter?.todoist_child_task_count) ?? 0;
+			const currentChildLinks = toStringArray(frontmatter?.todoist_child_tasks).slice().sort((a, b) => a.localeCompare(b));
+
+			if (
+				currentHasChildren === desiredHasChildren
+				&& currentChildCount === desiredChildCount
+				&& stringArraysEqual(currentChildLinks, desiredChildLinks)
+			) {
+				continue;
+			}
+
+			await this.app.fileManager.processFrontMatter(file, (rawFrontmatter) => {
+				const data = rawFrontmatter as Record<string, unknown>;
+				applyStandardTaskFrontmatter(data, this.settings);
+				touchModifiedDate(data);
+				data.todoist_has_children = desiredHasChildren;
+				data.todoist_child_task_count = desiredChildCount;
+				data.todoist_child_tasks = desiredChildLinks;
+			});
+		}
+	}
+
 	private async buildTodoistIdIndexInTaskFolder(): Promise<Map<string, TFile>> {
 		const folderPrefix = `${normalizePath(this.settings.tasksFolderPath)}/`;
 		const index = new Map<string, TFile>();
@@ -589,6 +632,9 @@ function buildNewFileContent(
 		}))}"`,
 		`todoist_labels: [${(item.labels ?? []).map((label) => toQuotedYamlInline(label)).join(', ')}]`,
 		`todoist_parent_id: "${escapeDoubleQuotes(item.parent_id ?? '')}"`,
+		'todoist_has_children: false',
+		'todoist_child_task_count: 0',
+		'todoist_child_tasks: []',
 		`todoist_last_imported_at: "${new Date().toISOString()}"`,
 		'---',
 		'',
@@ -639,11 +685,33 @@ function toOptionalNumber(value: unknown): number | undefined {
 	return typeof value === 'number' ? value : undefined;
 }
 
+function toOptionalBoolean(value: unknown): boolean | undefined {
+	if (value === true || value === 'true') {
+		return true;
+	}
+	if (value === false || value === 'false') {
+		return false;
+	}
+	return undefined;
+}
+
 function toStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}
 	return value.filter((entry): entry is string => typeof entry === 'string');
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+	if (left.length !== right.length) {
+		return false;
+	}
+	for (let i = 0; i < left.length; i += 1) {
+		if (left[i] !== right[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function buildRemoteImportSignature(item: TodoistItem, maps: ProjectSectionMaps): string {
