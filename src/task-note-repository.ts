@@ -10,6 +10,7 @@ import {
 	getTaskTitle,
 	setTaskStatus,
 	setTaskTitle,
+	touchModifiedDate,
 } from './task-frontmatter';
 
 interface ProjectSectionMaps {
@@ -46,7 +47,8 @@ export interface PendingLocalCreate {
 	syncSignature: string;
 	projectName?: string;
 	sectionName?: string;
-	dueRaw?: string;
+	dueDate?: string;
+	dueString?: string;
 	projectId?: string;
 	sectionId?: string;
 	priority?: number;
@@ -63,7 +65,8 @@ export interface PendingLocalUpdate {
 	syncSignature: string;
 	projectName?: string;
 	sectionName?: string;
-	dueRaw: string;
+	dueDate?: string;
+	dueString?: string;
 	projectId?: string;
 	sectionId?: string;
 }
@@ -141,33 +144,47 @@ export class TaskNoteRepository {
 		let changed = 0;
 		const archivePrefix = `${normalizePath(this.settings.archiveFolderPath)}/`;
 		for (const entry of missingEntries) {
+			const cachedFrontmatter = this.app.metadataCache.getFileCache(entry.file)?.frontmatter as Record<string, unknown> | undefined;
+			const currentSyncStatus =
+				typeof cachedFrontmatter?.todoist_sync_status === 'string'
+					? cachedFrontmatter.todoist_sync_status
+					: (typeof cachedFrontmatter?.sync_status === 'string' ? cachedFrontmatter.sync_status : '');
+			const currentTaskStatus = cachedFrontmatter ? getTaskStatus(cachedFrontmatter) : 'open';
+
 			if (mode === 'none') {
+				if (currentSyncStatus === 'missing_remote') {
+					continue;
+				}
 				await this.app.fileManager.processFrontMatter(entry.file, (frontmatter) => {
 					const data = frontmatter as Record<string, unknown>;
 					applyStandardTaskFrontmatter(data, this.settings);
-					if (data.todoist_sync_status !== 'missing_remote') {
-						data.todoist_sync_status = 'missing_remote';
-						data.todoist_last_imported_at = new Date().toISOString();
-					}
+					data.todoist_sync_status = 'missing_remote';
+					data.todoist_last_imported_at = new Date().toISOString();
 				});
 				changed += 1;
 				continue;
 			}
 
 			const alreadyArchived = entry.file.path.startsWith(archivePrefix);
-			await this.app.fileManager.processFrontMatter(entry.file, (frontmatter) => {
-				const data = frontmatter as Record<string, unknown>;
-				applyStandardTaskFrontmatter(data, this.settings);
-				const targetStatus = mode === 'move-to-archive-folder' ? 'archived_remote' : 'completed_remote';
-				setTaskStatus(data, 'done');
-				if (data.todoist_sync_status !== targetStatus) {
-					data.todoist_sync_status = targetStatus;
-				}
-				data.todoist_last_imported_at = new Date().toISOString();
-			});
-			changed += 1;
+			const targetStatus = mode === 'move-to-archive-folder' ? 'archived_remote' : 'completed_remote';
+			const needsFrontmatterUpdate = currentTaskStatus !== 'done' || currentSyncStatus !== targetStatus;
+			const needsArchiveMove = mode === 'move-to-archive-folder' && !alreadyArchived;
 
-			if (mode === 'move-to-archive-folder' && !alreadyArchived) {
+			if (!needsFrontmatterUpdate && !needsArchiveMove) {
+				continue;
+			}
+
+			if (needsFrontmatterUpdate) {
+				await this.app.fileManager.processFrontMatter(entry.file, (frontmatter) => {
+					const data = frontmatter as Record<string, unknown>;
+					applyStandardTaskFrontmatter(data, this.settings);
+					setTaskStatus(data, 'done');
+					data.todoist_sync_status = targetStatus;
+					data.todoist_last_imported_at = new Date().toISOString();
+				});
+			}
+
+			if (needsArchiveMove) {
 				await this.ensureFolderExists(this.settings.archiveFolderPath);
 				const targetPath = await this.getUniqueFilePathInFolder(
 					this.settings.archiveFolderPath,
@@ -178,6 +195,8 @@ export class TaskNoteRepository {
 					await this.app.fileManager.renameFile(entry.file, targetPath);
 				}
 			}
+
+			changed += 1;
 		}
 		return changed;
 	}
@@ -210,7 +229,8 @@ export class TaskNoteRepository {
 			const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
 			const isDone = getTaskStatus(frontmatter) === 'done';
 			const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
-			const dueRaw = getDueRawForSync(frontmatter);
+			const dueDate = toOptionalString(frontmatter.todoist_due);
+			const dueString = toOptionalString(frontmatter.todoist_due_string);
 			const signature = buildTodoistSyncSignature({
 				title,
 				description,
@@ -218,7 +238,8 @@ export class TaskNoteRepository {
 				isRecurring,
 				projectId: toOptionalString(frontmatter.todoist_project_id),
 				sectionId: toOptionalString(frontmatter.todoist_section_id),
-				dueRaw,
+				dueDate,
+				dueString,
 			});
 
 			pending.push({
@@ -230,7 +251,8 @@ export class TaskNoteRepository {
 				syncSignature: signature,
 				projectName: toOptionalString(frontmatter.todoist_project_name),
 				sectionName: toOptionalString(frontmatter.todoist_section_name),
-				dueRaw,
+				dueDate,
+				dueString,
 				projectId: toOptionalString(frontmatter.todoist_project_id),
 				sectionId: toOptionalString(frontmatter.todoist_section_id),
 				priority: toOptionalNumber(frontmatter.todoist_priority),
@@ -290,7 +312,8 @@ export class TaskNoteRepository {
 			const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
 			const fullContent = await this.app.vault.cachedRead(file);
 			const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
-			const dueRaw = getDueRawForSync(frontmatter) ?? '';
+			const dueDate = toOptionalString(frontmatter.todoist_due);
+			const dueString = toOptionalString(frontmatter.todoist_due_string);
 			const signature = buildTodoistSyncSignature({
 				title,
 				description,
@@ -298,7 +321,8 @@ export class TaskNoteRepository {
 				isRecurring,
 				projectId: toOptionalString(frontmatter.todoist_project_id),
 				sectionId: toOptionalString(frontmatter.todoist_section_id),
-				dueRaw,
+				dueDate,
+				dueString,
 			});
 			const lastSyncedSignature =
 				typeof frontmatter.todoist_last_synced_signature === 'string'
@@ -326,7 +350,8 @@ export class TaskNoteRepository {
 				syncSignature: signature,
 				projectName: toOptionalString(frontmatter.todoist_project_name),
 				sectionName: toOptionalString(frontmatter.todoist_section_name),
-				dueRaw,
+				dueDate,
+				dueString,
 				projectId: toOptionalString(frontmatter.todoist_project_id),
 				sectionId: toOptionalString(frontmatter.todoist_section_id),
 			});
@@ -373,6 +398,7 @@ export class TaskNoteRepository {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			const data = frontmatter as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
+			touchModifiedDate(data);
 			setTaskTitle(data, item.content);
 			setTaskStatus(data, item.checked ? 'done' : 'open');
 			data.todoist_sync = true;
@@ -393,7 +419,8 @@ export class TaskNoteRepository {
 				isRecurring: Boolean(item.due?.is_recurring),
 				projectId: item.project_id,
 				sectionId: item.section_id ?? undefined,
-				dueRaw: item.due?.is_recurring ? (item.due?.string ?? '') : (item.due?.date ?? ''),
+				dueDate: item.due?.date ?? '',
+				dueString: item.due?.string ?? '',
 			});
 			data.todoist_labels = item.labels ?? [];
 			data.todoist_parent_id = item.parent_id ?? '';
@@ -431,6 +458,7 @@ export class TaskNoteRepository {
 			await this.app.fileManager.processFrontMatter(childFile, (frontmatter) => {
 				const data = frontmatter as Record<string, unknown>;
 				applyStandardTaskFrontmatter(data, this.settings);
+				touchModifiedDate(data);
 				data.parent_task = parentLink;
 			});
 		}
@@ -556,7 +584,8 @@ function buildNewFileContent(
 			isRecurring: Boolean(item.due?.is_recurring),
 			projectId: item.project_id,
 			sectionId: item.section_id ?? undefined,
-			dueRaw: item.due?.is_recurring ? (item.due?.string ?? '') : (item.due?.date ?? ''),
+			dueDate: item.due?.date ?? '',
+			dueString: item.due?.string ?? '',
 		}))}"`,
 		`todoist_labels: [${(item.labels ?? []).map((label) => toQuotedYamlInline(label)).join(', ')}]`,
 		`todoist_parent_id: "${escapeDoubleQuotes(item.parent_id ?? '')}"`,
@@ -617,18 +646,6 @@ function toStringArray(value: unknown): string[] {
 	return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
-function getDueRawForSync(frontmatter: Record<string, unknown>): string | undefined {
-	const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
-	if (!isRecurring) {
-		return toOptionalString(frontmatter.todoist_due);
-	}
-	const dueString = toOptionalString(frontmatter.todoist_due_string);
-	if (dueString) {
-		return dueString;
-	}
-	return toOptionalString(frontmatter.todoist_due);
-}
-
 function buildRemoteImportSignature(item: TodoistItem, maps: ProjectSectionMaps): string {
 	return simpleStableHash(JSON.stringify([
 		item.content,
@@ -654,7 +671,8 @@ function buildTodoistSyncSignature(input: {
 	isRecurring: boolean;
 	projectId?: string;
 	sectionId?: string;
-	dueRaw?: string;
+	dueDate?: string;
+	dueString?: string;
 }): string {
 	return simpleStableHash(JSON.stringify([
 		input.title.trim(),
@@ -663,7 +681,8 @@ function buildTodoistSyncSignature(input: {
 		input.isRecurring ? 1 : 0,
 		input.projectId?.trim() ?? '',
 		input.sectionId?.trim() ?? '',
-		input.dueRaw?.trim() ?? '',
+		input.dueDate?.trim() ?? '',
+		input.dueString?.trim() ?? '',
 	]));
 }
 
@@ -682,17 +701,40 @@ function repairSignatureFrontmatterInContent(content: string): string {
 		return content;
 	}
 	const originalFrontmatter = frontmatterMatch[0];
-	let fixedFrontmatter = originalFrontmatter;
-	fixedFrontmatter = fixedFrontmatter.replace(
-		/^todoist_last_imported_signature:.*$/gm,
-		'todoist_last_imported_signature: ""',
-	);
-	fixedFrontmatter = fixedFrontmatter.replace(
-		/^todoist_last_synced_signature:.*$/gm,
-		'todoist_last_synced_signature: ""',
-	);
+	let changed = false;
+	const lines = originalFrontmatter.split('\n');
+	const fixedLines = lines.map((line) => {
+		if (/^\s*todoist_last_imported_signature:/.test(line)) {
+			if (!isValidSignatureFrontmatterLine(line, 'todoist_last_imported_signature')) {
+				changed = true;
+				return 'todoist_last_imported_signature: ""';
+			}
+			return line;
+		}
+		if (/^\s*todoist_last_synced_signature:/.test(line)) {
+			if (!isValidSignatureFrontmatterLine(line, 'todoist_last_synced_signature')) {
+				changed = true;
+				return 'todoist_last_synced_signature: ""';
+			}
+			return line;
+		}
+		return line;
+	});
+	if (!changed) {
+		return content;
+	}
+	const fixedFrontmatter = fixedLines.join('\n');
 	if (fixedFrontmatter === originalFrontmatter) {
 		return content;
 	}
 	return content.replace(originalFrontmatter, fixedFrontmatter);
+}
+
+function isValidSignatureFrontmatterLine(line: string, key: string): boolean {
+	const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const signaturePattern = new RegExp(
+		`^\\s*${escapedKey}:\\s*(?:"[0-9a-f]{8}"|'[0-9a-f]{8}'|[0-9a-f]{8}|""|'')?\\s*$`,
+		'i',
+	);
+	return signaturePattern.test(line);
 }

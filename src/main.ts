@@ -12,7 +12,7 @@ import { createLocalTaskNote, type LocalTaskNoteInput } from './task-note-factor
 import { registerInlineTaskConverter } from './inline-task-converter';
 import { createTaskConvertOverlayExtension } from './editor-task-convert-overlay';
 import { formatDueForDisplay, parseInlineTaskDirectives } from './task-directives';
-import { applyStandardTaskFrontmatter, setTaskStatus } from './task-frontmatter';
+import { applyStandardTaskFrontmatter, setTaskStatus, touchModifiedDate } from './task-frontmatter';
 
 export default class TaskTodoistPlugin extends Plugin {
 	settings: TaskTodoistSettings;
@@ -237,6 +237,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		await this.app.fileManager.processFrontMatter(taskFile, (frontmatter) => {
 			const data = frontmatter as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
+			touchModifiedDate(data);
 			setTaskStatus(data, isDone ? 'done' : 'open');
 			data.local_updated_at = new Date().toISOString();
 			const todoistId = typeof data.todoist_id === 'string' ? data.todoist_id : '';
@@ -441,6 +442,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		await this.app.fileManager.processFrontMatter(file, (frontmatterToMutate) => {
 			const data = frontmatterToMutate as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
+			touchModifiedDate(data);
 			data.todoist_sync_status = 'dirty_local';
 			data.local_updated_at = new Date().toISOString();
 			if ('sync_status' in data) {

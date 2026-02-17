@@ -7,7 +7,9 @@ export function applyStandardTaskFrontmatter(
 	if (typeof frontmatter.created !== 'string' || !frontmatter.created.trim()) {
 		frontmatter.created = formatCreatedDate(new Date());
 	}
-	frontmatter.modified = formatModifiedDate(new Date());
+	if (typeof frontmatter.modified !== 'string' || !frontmatter.modified.trim()) {
+		frontmatter.modified = formatModifiedDate(new Date());
+	}
 
 	const defaultTag = normalizeTag(settings.defaultTaskTag);
 	const existingTags = normalizeTags(frontmatter.tags);
@@ -19,6 +21,10 @@ export function applyStandardTaskFrontmatter(
 	if (!Array.isArray(frontmatter.links)) {
 		frontmatter.links = [];
 	}
+}
+
+export function touchModifiedDate(frontmatter: Record<string, unknown>): void {
+	frontmatter.modified = formatModifiedDate(new Date());
 }
 
 export function getTaskTitle(frontmatter: Record<string, unknown>, fallback = ''): string {

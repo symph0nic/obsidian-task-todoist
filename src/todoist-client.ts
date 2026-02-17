@@ -155,10 +155,9 @@ export class TodoistClient {
 		if (input.labels && input.labels.length > 0) {
 			args.labels = input.labels;
 		}
-		if (input.dueDate) {
-			args.due = { date: input.dueDate };
-		} else if (input.dueString) {
-			args.due = { string: input.dueString };
+		const due = buildDueObject(input.dueDate, input.dueString);
+		if (due) {
+			args.due = due;
 		}
 
 		const response = await this.syncWithCommands([
@@ -194,6 +193,7 @@ export class TodoistClient {
 		const commands = [];
 		const updateCommandId = generateUuid();
 		const isRecurringCompletion = Boolean(input.isDone && input.isRecurring);
+		const due = buildDueObject(input.dueDate, input.dueString);
 		commands.push({
 			type: 'item_update',
 			uuid: updateCommandId,
@@ -203,9 +203,8 @@ export class TodoistClient {
 				description: input.description ?? '',
 				...(input.projectId ? { project_id: input.projectId } : {}),
 				...(input.sectionId ? { section_id: input.sectionId } : {}),
-				...(isRecurringCompletion ? {} : (input.dueDate ? { due: { date: input.dueDate } } : {})),
-				...(isRecurringCompletion ? {} : (input.dueString ? { due: { string: input.dueString } } : {})),
-				...(isRecurringCompletion ? {} : (!input.dueDate && !input.dueString && input.clearDue ? { due: null } : {})),
+				...(isRecurringCompletion ? {} : (due ? { due } : {})),
+				...(isRecurringCompletion ? {} : (!due && input.clearDue ? { due: null } : {})),
 			},
 		});
 
@@ -266,6 +265,18 @@ export class TodoistClient {
 			throw: false,
 		});
 	}
+}
+
+function buildDueObject(dueDate?: string, dueString?: string): { date?: string; string?: string } | undefined {
+	const normalizedDate = dueDate?.trim() || '';
+	const normalizedString = dueString?.trim() || '';
+	if (!normalizedDate && !normalizedString) {
+		return undefined;
+	}
+	return {
+		...(normalizedDate ? { date: normalizedDate } : {}),
+		...(normalizedString ? { string: normalizedString } : {}),
+	};
 }
 
 function generateUuid(): string {

@@ -45,7 +45,8 @@ export class SyncService {
 					resolvedProjectId,
 					snapshot,
 				);
-				const { dueDate, dueString } = resolveDue(pending.dueRaw);
+				const dueDate = pending.dueDate?.trim() || undefined;
+				const dueString = pending.dueString?.trim() || undefined;
 				const createdTodoistId = await todoistClient.createTask({
 					content: pending.title,
 					description: pending.description,
@@ -80,7 +81,8 @@ export class SyncService {
 					resolvedProjectId,
 					snapshot,
 				);
-				const { dueDate, dueString } = resolveDue(pending.dueRaw);
+				const dueDate = pending.dueDate?.trim() || undefined;
+				const dueString = pending.dueString?.trim() || undefined;
 				await todoistClient.updateTask({
 					id: pending.todoistId,
 					content: pending.title,
@@ -212,15 +214,4 @@ function resolveSectionId(
 		(item) => item.project_id === projectId && item.name.toLowerCase() === sectionName.trim().toLowerCase(),
 	);
 	return section?.id;
-}
-
-function resolveDue(dueRaw: string | undefined): { dueDate?: string; dueString?: string } {
-	const due = dueRaw?.trim() ?? '';
-	if (!due) {
-		return {};
-	}
-	if (/^\d{4}-\d{2}-\d{2}$/.test(due)) {
-		return { dueDate: due };
-	}
-	return { dueString: due };
 }
