@@ -96,6 +96,7 @@ export class SyncService {
 					clearDue: !dueDate && !dueString,
 				});
 				await repository.markLocalUpdateSynced(pending.file, pending.syncSignature);
+				await repository.renameTaskFileToMatchTitle(pending.file, pending.title);
 			}
 
 			snapshot = await todoistClient.fetchSyncSnapshot();

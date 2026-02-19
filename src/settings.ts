@@ -6,6 +6,7 @@ export type ImportProjectScope = 'all-projects' | 'allow-list-by-name';
 export interface TaskTodoistSettings {
 	tasksFolderPath: string;
 	defaultTaskTag: string;
+	autoRenameTaskFiles: boolean;
 	autoSyncEnabled: boolean;
 	autoSyncIntervalMinutes: number;
 	showScheduledSyncNotices: boolean;
@@ -22,6 +23,7 @@ export interface TaskTodoistSettings {
 export const DEFAULT_SETTINGS: TaskTodoistSettings = {
 	tasksFolderPath: 'Tasks',
 	defaultTaskTag: 'tasks',
+	autoRenameTaskFiles: true,
 	autoSyncEnabled: true,
 	autoSyncIntervalMinutes: 5,
 	showScheduledSyncNotices: false,

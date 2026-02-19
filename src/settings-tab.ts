@@ -45,6 +45,16 @@ export class TaskTodoistSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
+			.setName('Auto-rename task files from title')
+			.setDesc('When task title changes locally or in todoist, rename the note file to match.')
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.autoRenameTaskFiles).onChange(async (value) => {
+					this.plugin.settings.autoRenameTaskFiles = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
 			.setName('Archive mode')
 			.setDesc('How to represent completed or deleted todoist tasks locally.')
 			.addDropdown((dropdown) => {

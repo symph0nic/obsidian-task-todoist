@@ -374,6 +374,23 @@ export class TaskNoteRepository {
 		});
 	}
 
+	async renameTaskFileToMatchTitle(file: TFile, title: string): Promise<TFile> {
+		if (!this.settings.autoRenameTaskFiles) {
+			return file;
+		}
+		const desiredBaseName = sanitizeFileName(title.trim());
+		if (!desiredBaseName || file.basename === desiredBaseName) {
+			return file;
+		}
+		const folderPath = getFolderPath(file.path);
+		const desiredPath = await this.getUniqueFilePathInFolder(folderPath, `${desiredBaseName}.md`, file.path);
+		if (desiredPath === file.path) {
+			return file;
+		}
+		await this.app.fileManager.renameFile(file, desiredPath);
+		return file;
+	}
+
 	private async createTaskFile(item: TodoistItem, maps: ProjectSectionMaps): Promise<UpsertResult & { file: TFile }> {
 		const filePath = await this.getUniqueTaskFilePath(item.content, item.id);
 		const markdown = buildNewFileContent(item, maps.projectNameById, maps.sectionNameById, this.settings);
@@ -438,7 +455,9 @@ export class TaskNoteRepository {
 			await this.app.vault.modify(file, nextContent);
 		}
 
-		return { created: 0, updated: 1, file };
+		const renamedFile = await this.renameTaskFileToMatchTitle(file, item.content);
+
+		return { created: 0, updated: 1, file: renamedFile };
 	}
 
 	private async applyParentLinks(todoistIdIndex: Map<string, TFile>, assignments: ParentAssignment[]): Promise<void> {
@@ -646,6 +665,14 @@ function buildNewFileContent(
 
 function toWikiLink(filePath: string): string {
 	return `[[${filePath.replace(/\.md$/i, '')}]]`;
+}
+
+function getFolderPath(path: string): string {
+	const slashIndex = path.lastIndexOf('/');
+	if (slashIndex <= 0) {
+		return '';
+	}
+	return path.slice(0, slashIndex);
 }
 
 function hasBodyContent(markdown: string): boolean {
