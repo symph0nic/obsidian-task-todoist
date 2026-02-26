@@ -439,6 +439,17 @@ export default class TaskTodoistPlugin extends Plugin {
 			return;
 		}
 
+		const lastSyncedSignature =
+			typeof frontmatter.todoist_last_synced_signature === 'string'
+				? frontmatter.todoist_last_synced_signature.trim()
+				: '';
+		if (lastSyncedSignature) {
+			const currentSignature = await this.computeCurrentTodoistSyncSignature(file, frontmatter);
+			if (currentSignature === lastSyncedSignature) {
+				return;
+			}
+		}
+
 		await this.app.fileManager.processFrontMatter(file, (frontmatterToMutate) => {
 			const data = frontmatterToMutate as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
@@ -455,6 +466,36 @@ export default class TaskTodoistPlugin extends Plugin {
 		const taskFolder = normalizePath(this.settings.tasksFolderPath);
 		const taskPrefix = `${taskFolder}/`;
 		return path === taskFolder || path.startsWith(taskPrefix);
+	}
+
+	private async computeCurrentTodoistSyncSignature(
+		file: TFile,
+		frontmatter: Record<string, unknown>,
+	): Promise<string> {
+		const fullContent = await this.app.vault.cachedRead(file);
+		const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
+		const title = typeof frontmatter.task_title === 'string' && frontmatter.task_title.trim()
+			? frontmatter.task_title.trim()
+			: file.basename.trim();
+		const taskStatus = typeof frontmatter.task_status === 'string' ? frontmatter.task_status : '';
+		const taskDone = frontmatter.task_done === true || frontmatter.task_done === 'true';
+		const isDone = taskStatus === 'done' || taskDone;
+		const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
+		const projectId = typeof frontmatter.todoist_project_id === 'string' ? frontmatter.todoist_project_id.trim() : '';
+		const sectionId = typeof frontmatter.todoist_section_id === 'string' ? frontmatter.todoist_section_id.trim() : '';
+		const dueDate = typeof frontmatter.todoist_due === 'string' ? frontmatter.todoist_due.trim() : '';
+		const dueString = typeof frontmatter.todoist_due_string === 'string' ? frontmatter.todoist_due_string.trim() : '';
+
+		return simpleStableHash(JSON.stringify([
+			title,
+			description,
+			isDone ? 1 : 0,
+			isRecurring ? 1 : 0,
+			projectId,
+			sectionId,
+			dueDate,
+			dueString,
+		]));
 	}
 }
 
@@ -495,4 +536,13 @@ function buildMetaSummary(
 		}
 	}
 	return parts.join(' • ');
+}
+
+function simpleStableHash(value: string): string {
+	let hash = 2166136261;
+	for (let i = 0; i < value.length; i += 1) {
+		hash ^= value.charCodeAt(i);
+		hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+	}
+	return (hash >>> 0).toString(16).padStart(8, '0');
 }
