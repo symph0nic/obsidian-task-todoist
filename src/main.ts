@@ -1,4 +1,4 @@
-import { Editor, MarkdownView, Notice, Plugin, TAbstractFile, TFile, normalizePath } from 'obsidian';
+import { Editor, MarkdownView, Notice, Plugin, TAbstractFile, TFile, getFrontMatterInfo, normalizePath, parseYaml } from 'obsidian';
 import {
 	DEFAULT_TODOIST_TOKEN_SECRET_NAME,
 	DEFAULT_SETTINGS,
@@ -420,7 +420,10 @@ export default class TaskTodoistPlugin extends Plugin {
 			return;
 		}
 
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const fullContent = await this.app.vault.cachedRead(file);
+		const parsedFrontmatter = this.parseFrontmatterFromContent(fullContent);
+		const cachedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const frontmatter = parsedFrontmatter ?? cachedFrontmatter;
 		if (!frontmatter) {
 			return;
 		}
@@ -444,7 +447,7 @@ export default class TaskTodoistPlugin extends Plugin {
 				? frontmatter.todoist_last_synced_signature.trim()
 				: '';
 		if (lastSyncedSignature) {
-			const currentSignature = await this.computeCurrentTodoistSyncSignature(file, frontmatter);
+			const currentSignature = this.computeCurrentTodoistSyncSignature(file, fullContent, frontmatter);
 			if (currentSignature === lastSyncedSignature) {
 				return;
 			}
@@ -468,11 +471,11 @@ export default class TaskTodoistPlugin extends Plugin {
 		return path === taskFolder || path.startsWith(taskPrefix);
 	}
 
-	private async computeCurrentTodoistSyncSignature(
+	private computeCurrentTodoistSyncSignature(
 		file: TFile,
+		fullContent: string,
 		frontmatter: Record<string, unknown>,
-	): Promise<string> {
-		const fullContent = await this.app.vault.cachedRead(file);
+	): string {
 		const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
 		const title = typeof frontmatter.task_title === 'string' && frontmatter.task_title.trim()
 			? frontmatter.task_title.trim()
@@ -496,6 +499,18 @@ export default class TaskTodoistPlugin extends Plugin {
 			dueDate,
 			dueString,
 		]));
+	}
+
+	private parseFrontmatterFromContent(content: string): Record<string, unknown> | null {
+		const frontmatterInfo = getFrontMatterInfo(content);
+		if (!frontmatterInfo.exists || frontmatterInfo.frontmatter.trim() === '') {
+			return null;
+		}
+		const parsed = parseYaml(frontmatterInfo.frontmatter);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+			return null;
+		}
+		return parsed as Record<string, unknown>;
 	}
 }
 
