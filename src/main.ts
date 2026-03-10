@@ -7,12 +7,12 @@ import {
 import { TaskTodoistSettingTab } from './settings-tab';
 import { TodoistClient, type TodoistProjectSectionLookup } from './todoist-client';
 import { SyncService } from './sync-service';
-import { CreateTaskModal } from './create-task-modal';
+import { CreateTaskModal, type TaskModalTaskData } from './create-task-modal';
 import { createLocalTaskNote, type LocalTaskNoteInput } from './task-note-factory';
 import { registerInlineTaskConverter } from './inline-task-converter';
 import { createTaskConvertOverlayExtension } from './editor-task-convert-overlay';
 import { formatDueForDisplay, parseInlineTaskDirectives } from './task-directives';
-import { applyStandardTaskFrontmatter, setTaskStatus, touchModifiedDate } from './task-frontmatter';
+import { applyStandardTaskFrontmatter, setTaskStatus, setTaskTitle, touchModifiedDate } from './task-frontmatter';
 
 export default class TaskTodoistPlugin extends Plugin {
 	settings: TaskTodoistSettings;
@@ -30,7 +30,9 @@ export default class TaskTodoistPlugin extends Plugin {
 	private syncInProgress = false;
 	private syncQueued = false;
 	private lookupCache: { expiresAt: number; value: TodoistProjectSectionLookup } | null = null;
+	private pendingTaskLinkInteraction: { linkTarget: string; sourcePath: string; timeoutId: number } | null = null;
 	private static readonly UNCHECKED_TASK_LINE_REGEX = /^(\s*[-*+]\s+\[\s\]\s+)(.+)$/;
+	private static readonly TASK_LINK_DOUBLE_CLICK_DELAY_MS = 260;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -38,6 +40,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		this.addSettingTab(new TaskTodoistSettingTab(this.app, this));
 		this.registerCommands();
 		this.registerVaultTaskDirtyTracking();
+		this.registerTaskLinkDoubleClickHandler();
 		registerInlineTaskConverter(this);
 		this.registerEditorExtension(createTaskConvertOverlayExtension(this));
 		this.configureScheduledSync();
@@ -161,6 +164,17 @@ export default class TaskTodoistPlugin extends Plugin {
 		new CreateTaskModal(this.app, this, initialTitle).open();
 	}
 
+	async openEditTaskModalByLink(linkTarget: string, sourcePath = ''): Promise<void> {
+		const taskFile = this.resolveTaskFileByLink(linkTarget, sourcePath);
+		if (!taskFile) {
+			new Notice('Task note could not be resolved from the clicked link.', 5000);
+			return;
+		}
+
+		const taskData = await this.getTaskModalData(taskFile);
+		new CreateTaskModal(this.app, this, '', taskData).open();
+	}
+
 	async convertEditorChecklistLineToTaskNote(editor: Editor): Promise<{ ok: boolean; message: string }> {
 		const lineNumber = editor.getCursor().line;
 		return this.convertChecklistLineByEditorLine(editor, lineNumber);
@@ -250,6 +264,68 @@ export default class TaskTodoistPlugin extends Plugin {
 		});
 	}
 
+	async updateTaskNote(file: TFile, input: LocalTaskNoteInput): Promise<TFile> {
+		const normalizedTitle = input.title.trim();
+		const normalizedDescription = input.description?.trim() ?? '';
+		const normalizedParentTaskLink = input.parentTaskLink?.trim() ?? '';
+		const normalizedProjectId = input.todoistProjectId?.trim() ?? '';
+		const normalizedProjectName = input.todoistProjectName?.trim() ?? '';
+		const normalizedSectionId = input.todoistSectionId?.trim() ?? '';
+		const normalizedSectionName = input.todoistSectionName?.trim() ?? '';
+		const normalizedDueDate = input.todoistDueDate?.trim() ?? '';
+		const normalizedDueString = input.todoistDueString?.trim() ?? '';
+		const isRecurring = Boolean(normalizedDueString);
+
+		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+			const data = frontmatter as Record<string, unknown>;
+			applyStandardTaskFrontmatter(data, this.settings);
+			touchModifiedDate(data);
+			setTaskTitle(data, normalizedTitle);
+			if (normalizedParentTaskLink) {
+				data.parent_task = normalizedParentTaskLink;
+			} else if ('parent_task' in data) {
+				delete data.parent_task;
+			}
+			data.todoist_sync = input.todoistSync;
+			data.todoist_project_id = normalizedProjectId;
+			data.todoist_project_name = normalizedProjectName;
+			data.todoist_section_id = normalizedSectionId;
+			data.todoist_section_name = normalizedSectionName;
+			data.todoist_due = normalizedDueDate;
+			data.todoist_due_string = normalizedDueString;
+			data.todoist_is_recurring = isRecurring;
+			data.local_updated_at = new Date().toISOString();
+			const todoistId = typeof data.todoist_id === 'string' ? data.todoist_id.trim() : '';
+			data.todoist_sync_status = todoistId
+				? (input.todoistSync ? 'dirty_local' : 'local_only')
+				: (input.todoistSync ? 'queued_local_create' : 'local_only');
+			if ('sync_status' in data) {
+				delete data.sync_status;
+			}
+		});
+
+		const currentContent = await this.app.vault.cachedRead(file);
+		const nextContent = replaceBodyContent(currentContent, normalizedDescription);
+		if (nextContent !== currentContent) {
+			await this.app.vault.modify(file, nextContent);
+		}
+
+		const renamed = await this.renameTaskFileToMatchTitle(file, normalizedTitle);
+		const oldLinkTarget = file.path.replace(/\.md$/i, '');
+		const newLinkTarget = renamed.path.replace(/\.md$/i, '');
+		if (oldLinkTarget !== newLinkTarget) {
+			this.recentTaskMetaByLink.delete(oldLinkTarget);
+		}
+		this.recentTaskMetaByLink.set(newLinkTarget, {
+			projectName: normalizedProjectName || undefined,
+			sectionName: normalizedSectionName || undefined,
+			dueDate: normalizedDueDate || undefined,
+			dueString: normalizedDueString || undefined,
+			isRecurring,
+		});
+		return renamed;
+	}
+
 	getLinkedTaskMetaSummary(linkTarget: string): string {
 		const sourcePath = this.app.workspace.getActiveFile()?.path ?? '';
 		const taskFile = this.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
@@ -259,7 +335,7 @@ export default class TaskTodoistPlugin extends Plugin {
 				const projectName = typeof frontmatter.todoist_project_name === 'string' ? frontmatter.todoist_project_name.trim() : '';
 				const sectionName = typeof frontmatter.todoist_section_name === 'string' ? frontmatter.todoist_section_name.trim() : '';
 				const dueString = typeof frontmatter.todoist_due_string === 'string' ? frontmatter.todoist_due_string.trim() : '';
-				const dueDate = typeof frontmatter.todoist_due === 'string' ? frontmatter.todoist_due.trim() : '';
+				const dueDate = normalizeFrontmatterDateValue(frontmatter.todoist_due);
 				const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
 				const summary = buildMetaSummary(projectName, sectionName, dueDate, dueString, isRecurring);
 				if (summary) {
@@ -281,6 +357,58 @@ export default class TaskTodoistPlugin extends Plugin {
 		}
 
 		return '';
+	}
+
+	private async getTaskModalData(file: TFile): Promise<TaskModalTaskData> {
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const content = await this.app.vault.cachedRead(file);
+		return {
+			file,
+			title: getTaskTitleFromFrontmatter(frontmatter, file.basename),
+			description: stripFrontmatter(content).trim(),
+			parentTaskLink: typeof frontmatter?.parent_task === 'string' ? frontmatter.parent_task.trim() : '',
+			todoistSync: frontmatter?.todoist_sync === true || frontmatter?.todoist_sync === 'true',
+			todoistProjectId: typeof frontmatter?.todoist_project_id === 'string' ? frontmatter.todoist_project_id.trim() : '',
+			todoistProjectName: typeof frontmatter?.todoist_project_name === 'string' ? frontmatter.todoist_project_name.trim() : '',
+			todoistSectionId: typeof frontmatter?.todoist_section_id === 'string' ? frontmatter.todoist_section_id.trim() : '',
+			todoistSectionName: typeof frontmatter?.todoist_section_name === 'string' ? frontmatter.todoist_section_name.trim() : '',
+			todoistDueDate: normalizeFrontmatterDateValue(frontmatter?.todoist_due),
+			todoistDueString: typeof frontmatter?.todoist_due_string === 'string' ? frontmatter.todoist_due_string.trim() : '',
+		};
+	}
+
+	private async renameTaskFileToMatchTitle(file: TFile, title: string): Promise<TFile> {
+		if (!this.settings.autoRenameTaskFiles) {
+			return file;
+		}
+		const desiredBaseName = sanitizeTaskFileName(title.trim());
+		if (!desiredBaseName || file.basename === desiredBaseName) {
+			return file;
+		}
+		const folderPath = getFolderPath(file.path);
+		const desiredPath = await this.getUniqueFilePathInFolder(folderPath, `${desiredBaseName}.md`, file.path);
+		if (desiredPath === file.path) {
+			return file;
+		}
+		await this.app.fileManager.renameFile(file, desiredPath);
+		return file;
+	}
+
+	private async getUniqueFilePathInFolder(folderPath: string, desiredFileName: string, currentPath: string): Promise<string> {
+		const normalizedFolder = normalizePath(folderPath);
+		const sanitizedBaseName = sanitizeTaskFileName(desiredFileName.replace(/\.md$/i, '')) || 'Task';
+		let candidate = normalizePath(`${normalizedFolder}/${sanitizedBaseName}.md`);
+		if (candidate === currentPath || !this.app.vault.getAbstractFileByPath(candidate)) {
+			return candidate;
+		}
+		let suffix = 2;
+		while (true) {
+			candidate = normalizePath(`${normalizedFolder}/${sanitizedBaseName}-${suffix}.md`);
+			if (candidate === currentPath || !this.app.vault.getAbstractFileByPath(candidate)) {
+				return candidate;
+			}
+			suffix += 1;
+		}
 	}
 
 	async updateTodoistTokenSecretName(secretName: string): Promise<void> {
@@ -409,6 +537,76 @@ export default class TaskTodoistPlugin extends Plugin {
 		}));
 	}
 
+	private registerTaskLinkDoubleClickHandler(): void {
+		const handlePointerActivation = (event: MouseEvent) => {
+			if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+				return;
+			}
+			const target = event.target;
+			if (!(target instanceof HTMLElement)) {
+				return;
+			}
+			const linkEl = target.closest('.internal-link');
+			if (!(linkEl instanceof HTMLElement)) {
+				return;
+			}
+			const linkTarget = readInternalLinkTarget(linkEl);
+			if (!linkTarget) {
+				return;
+			}
+			const sourcePath = this.app.workspace.getActiveFile()?.path ?? '';
+			const taskFile = this.resolveTaskFileByLink(linkTarget, sourcePath);
+			if (!taskFile) {
+				return;
+			}
+			event.preventDefault();
+			event.stopPropagation();
+			if ('stopImmediatePropagation' in event) {
+				event.stopImmediatePropagation();
+			}
+			this.handleTaskLinkInteraction(linkTarget, sourcePath);
+		};
+
+		document.addEventListener('click', handlePointerActivation, true);
+		this.register(() => {
+			document.removeEventListener('click', handlePointerActivation, true);
+			this.clearPendingTaskLinkInteraction();
+		});
+	}
+
+	handleTaskLinkInteraction(linkTarget: string, sourcePath: string): void {
+		const normalizedLinkTarget = linkTarget.trim();
+		if (!normalizedLinkTarget) {
+			return;
+		}
+		const pending = this.pendingTaskLinkInteraction;
+		if (pending && pending.linkTarget === normalizedLinkTarget && pending.sourcePath === sourcePath) {
+			window.clearTimeout(pending.timeoutId);
+			this.pendingTaskLinkInteraction = null;
+			void this.openEditTaskModalByLink(normalizedLinkTarget, sourcePath);
+			return;
+		}
+
+		this.clearPendingTaskLinkInteraction();
+		const timeoutId = window.setTimeout(() => {
+			this.pendingTaskLinkInteraction = null;
+			void this.app.workspace.openLinkText(normalizedLinkTarget, sourcePath, false);
+		}, TaskTodoistPlugin.TASK_LINK_DOUBLE_CLICK_DELAY_MS);
+		this.pendingTaskLinkInteraction = {
+			linkTarget: normalizedLinkTarget,
+			sourcePath,
+			timeoutId,
+		};
+	}
+
+	private clearPendingTaskLinkInteraction(): void {
+		if (!this.pendingTaskLinkInteraction) {
+			return;
+		}
+		window.clearTimeout(this.pendingTaskLinkInteraction.timeoutId);
+		this.pendingTaskLinkInteraction = null;
+	}
+
 	private async onVaultFileModified(file: TAbstractFile): Promise<void> {
 		if (!(file instanceof TFile) || file.extension !== 'md') {
 			return;
@@ -471,6 +669,28 @@ export default class TaskTodoistPlugin extends Plugin {
 		return path === taskFolder || path.startsWith(taskPrefix);
 	}
 
+	private resolveTaskFileByLink(linkTarget: string, sourcePath: string): TFile | null {
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+		if (resolved && this.isTaskFilePath(resolved.path)) {
+			return resolved;
+		}
+
+		const normalizedTarget = normalizePath(linkTarget.replace(/^\[\[|\]\]$/g, '').replace(/#.*$/, '').trim());
+		if (!normalizedTarget) {
+			return null;
+		}
+		const directCandidates = normalizedTarget.toLowerCase().endsWith('.md')
+			? [normalizedTarget]
+			: [normalizedTarget, `${normalizedTarget}.md`];
+		for (const candidate of directCandidates) {
+			const file = this.app.vault.getAbstractFileByPath(candidate);
+			if (file instanceof TFile && this.isTaskFilePath(file.path)) {
+				return file;
+			}
+		}
+		return null;
+	}
+
 	private computeCurrentTodoistSyncSignature(
 		file: TFile,
 		fullContent: string,
@@ -486,7 +706,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
 		const projectId = typeof frontmatter.todoist_project_id === 'string' ? frontmatter.todoist_project_id.trim() : '';
 		const sectionId = typeof frontmatter.todoist_section_id === 'string' ? frontmatter.todoist_section_id.trim() : '';
-		const dueDate = typeof frontmatter.todoist_due === 'string' ? frontmatter.todoist_due.trim() : '';
+		const dueDate = normalizeFrontmatterDateValue(frontmatter.todoist_due);
 		const dueString = typeof frontmatter.todoist_due_string === 'string' ? frontmatter.todoist_due_string.trim() : '';
 
 		return simpleStableHash(JSON.stringify([
@@ -516,6 +736,71 @@ export default class TaskTodoistPlugin extends Plugin {
 
 function normalizeTaskText(value: string): string {
 	return value.replace(/\s+/g, ' ').trim();
+}
+
+function getTaskTitleFromFrontmatter(frontmatter: Record<string, unknown> | undefined, fallback: string): string {
+	const taskTitle = typeof frontmatter?.task_title === 'string' ? frontmatter.task_title.trim() : '';
+	if (taskTitle) {
+		return taskTitle;
+	}
+	const legacyTitle = typeof frontmatter?.title === 'string' ? frontmatter.title.trim() : '';
+	if (legacyTitle) {
+		return legacyTitle;
+	}
+	return fallback;
+}
+
+function stripFrontmatter(content: string): string {
+	return content.replace(/^---[\s\S]*?---\n?/, '');
+}
+
+function replaceBodyContent(content: string, nextBody: string): string {
+	const frontmatterMatch = content.match(/^---[\s\S]*?---\n?/);
+	const frontmatter = frontmatterMatch?.[0] ?? '';
+	const normalizedBody = nextBody.trim() ? `${nextBody.trim()}\n` : '';
+	return `${frontmatter}${normalizedBody}`;
+}
+
+function getFolderPath(path: string): string {
+	const lastSlashIndex = path.lastIndexOf('/');
+	if (lastSlashIndex === -1) {
+		return '';
+	}
+	return path.slice(0, lastSlashIndex);
+}
+
+function sanitizeTaskFileName(value: string): string {
+	return value
+		.replace(/[\\/:*?"<>|]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 80);
+}
+
+function readInternalLinkTarget(linkEl: HTMLElement): string {
+	const dataHref = linkEl.getAttribute('data-href')?.trim() ?? '';
+	if (dataHref) {
+		return dataHref;
+	}
+	const href = linkEl.getAttribute('href')?.trim() ?? '';
+	if (!href) {
+		return '';
+	}
+	return href.replace(/^#/, '').trim();
+}
+
+function normalizeFrontmatterDateValue(value: unknown): string {
+	if (typeof value === 'string') {
+		return value.trim();
+	}
+	if (value instanceof Date && Number.isFinite(value.getTime())) {
+		return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+	}
+	return '';
+}
+
+function pad2(value: number): string {
+	return String(value).padStart(2, '0');
 }
 
 function normalizeSyncInterval(value: number): number {

@@ -32,6 +32,11 @@ export function createTaskConvertOverlayExtension(plugin: TaskTodoistPlugin) {
 		}
 	}, {
 		decorations: (value) => value.decorations,
+		eventHandlers: {
+			click(event, view) {
+				return handleLinkedTaskClick(event, view, plugin);
+			},
+		},
 	});
 }
 
@@ -45,20 +50,16 @@ function buildDecorations(view: EditorView, plugin: TaskTodoistPlugin): Decorati
 
 			const linkedMatch = line.text.match(LINKED_TASK_LINE_REGEX);
 			if (linkedMatch) {
-				const prefix = linkedMatch[1] ?? '';
-				const wikiLink = linkedMatch[2] ?? '';
 				const linkTarget = linkedMatch[3] ?? '';
-				const linkAlias = linkedMatch[4] ?? '';
-				const title = normalizeTaskText(linkAlias || basename(linkTarget));
+				const metaSummary = linkTarget ? plugin.getLinkedTaskMetaSummary(linkTarget) : '';
 
-				if (wikiLink && title && linkTarget) {
-					const from = line.from + prefix.length;
-					const to = from + wikiLink.length;
+				if (linkTarget && metaSummary) {
 					builder.add(
-						from,
-						to,
-						Decoration.replace({
-							widget: new LinkedTaskTextWidget(plugin, title, linkTarget),
+						line.to,
+						line.to,
+						Decoration.widget({
+							side: 1,
+							widget: new LinkedTaskMetaWidget(metaSummary),
 						}),
 					);
 				}
@@ -117,56 +118,28 @@ class ConvertTaskWidget extends WidgetType {
 	}
 }
 
-class LinkedTaskTextWidget extends WidgetType {
-	private readonly plugin: TaskTodoistPlugin;
-	private readonly title: string;
-	private readonly linkTarget: string;
+class LinkedTaskMetaWidget extends WidgetType {
+	private readonly metaSummary: string;
 
-	constructor(plugin: TaskTodoistPlugin, title: string, linkTarget: string) {
+	constructor(metaSummary: string) {
 		super();
-		this.plugin = plugin;
-		this.title = title;
-		this.linkTarget = linkTarget;
+		this.metaSummary = metaSummary;
+	}
+
+	eq(other: LinkedTaskMetaWidget): boolean {
+		return this.metaSummary === other.metaSummary;
 	}
 
 	toDOM(): HTMLElement {
-		const button = document.createElement('button');
-		button.type = 'button';
-		button.className = 'task-todoist-linked-inline';
-		button.title = 'Open task note';
-		button.setAttribute('aria-label', 'Open task note');
-
-		const titleEl = document.createElement('span');
-		titleEl.className = 'task-todoist-inline-title';
-		titleEl.textContent = this.title;
-		button.appendChild(titleEl);
-
-		const metaSummary = this.plugin.getLinkedTaskMetaSummary(this.linkTarget);
-		if (metaSummary) {
-			const meta = document.createElement('span');
-			meta.className = 'task-todoist-inline-meta';
-			meta.textContent = metaSummary;
-			button.appendChild(meta);
-		}
-
-		button.addEventListener('click', (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			const sourcePath = this.plugin.app.workspace.getActiveFile()?.path ?? '';
-			void this.plugin.app.workspace.openLinkText(this.linkTarget, sourcePath, true);
-		});
-		return button;
+		const meta = document.createElement('span');
+		meta.className = 'task-todoist-linked-inline';
+		meta.textContent = this.metaSummary;
+		return meta;
 	}
 }
 
 function normalizeTaskText(value: string): string {
 	return value.replace(/\s+/g, ' ').trim();
-}
-
-function basename(path: string): string {
-	const noExt = path.replace(/\.md$/i, '');
-	const parts = noExt.split('/');
-	return parts[parts.length - 1] ?? noExt;
 }
 
 function readLinkedTaskStatusMap(docText: string): Map<string, boolean> {
@@ -186,4 +159,44 @@ function readLinkedTaskStatusMap(docText: string): Map<string, boolean> {
 		map.set(linkTarget, isChecked);
 	}
 	return map;
+}
+
+function handleLinkedTaskClick(event: MouseEvent, view: EditorView, plugin: TaskTodoistPlugin): boolean {
+	if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+		return false;
+	}
+	const target = event.target;
+	if (!(target instanceof HTMLElement)) {
+		return false;
+	}
+	const clickable = target.closest('.cm-hmd-internal-link, .internal-link, .task-todoist-linked-inline');
+	if (!(clickable instanceof HTMLElement)) {
+		return false;
+	}
+
+	let position: number;
+	try {
+		position = view.posAtDOM(clickable, 0);
+	} catch {
+		return false;
+	}
+
+	const line = view.state.doc.lineAt(position);
+	const match = line.text.match(LINKED_TASK_LINE_REGEX);
+	if (!match) {
+		return false;
+	}
+
+	const linkTarget = match[3] ?? '';
+	if (!linkTarget) {
+		return false;
+	}
+
+	event.preventDefault();
+	event.stopPropagation();
+	if ('stopImmediatePropagation' in event) {
+		event.stopImmediatePropagation();
+	}
+	plugin.handleTaskLinkInteraction(linkTarget, plugin.app.workspace.getActiveFile()?.path ?? '');
+	return true;
 }

@@ -4,9 +4,24 @@ import { formatDueForDisplay, parseInlineTaskDirectives } from './task-directive
 import type { TodoistProject, TodoistSection } from './todoist-client';
 import { getTaskTitle } from './task-frontmatter';
 
+export interface TaskModalTaskData {
+	file: TFile;
+	title: string;
+	description: string;
+	parentTaskLink: string;
+	todoistSync: boolean;
+	todoistProjectId: string;
+	todoistProjectName: string;
+	todoistSectionId: string;
+	todoistSectionName: string;
+	todoistDueDate: string;
+	todoistDueString: string;
+}
+
 export class CreateTaskModal extends Modal {
 	private readonly plugin: TaskTodoistPlugin;
 	private readonly initialTitle: string;
+	private readonly existingTask: TaskModalTaskData | null;
 	private title = '';
 	private description = '';
 	private parentTaskLink = '';
@@ -23,6 +38,7 @@ export class CreateTaskModal extends Modal {
 	private parentTaskInput: TextComponent | null = null;
 	private dueDateManuallyEdited = false;
 	private recurrenceManuallyEdited = false;
+	private preserveInitialExistingValues = false;
 	private suppressFieldChangeHandlers = false;
 	private projectInput: TextComponent | null = null;
 	private sectionInput: TextComponent | null = null;
@@ -38,17 +54,29 @@ export class CreateTaskModal extends Modal {
 	private parentTaskLookup = new Map<string, ParentTaskLookupEntry>();
 	private parentTaskLookupByLink = new Map<string, ParentTaskLookupEntry>();
 
-	constructor(app: App, plugin: TaskTodoistPlugin, initialTitle = '') {
+	constructor(app: App, plugin: TaskTodoistPlugin, initialTitle = '', existingTask: TaskModalTaskData | null = null) {
 		super(app);
 		this.plugin = plugin;
 		this.initialTitle = initialTitle.trim();
-		this.title = this.initialTitle;
+		this.existingTask = existingTask;
+		this.title = existingTask?.title ?? this.initialTitle;
+		this.description = existingTask?.description ?? '';
+		this.parentTaskLink = existingTask?.parentTaskLink ?? '';
+		this.todoistProjectId = existingTask?.todoistProjectId ?? '';
+		this.todoistProjectName = existingTask?.todoistProjectName ?? '';
+		this.todoistSectionId = existingTask?.todoistSectionId ?? '';
+		this.todoistSectionName = existingTask?.todoistSectionName ?? '';
+		this.todoistDueDate = existingTask?.todoistDueDate ?? '';
+		this.todoistRecurrence = existingTask?.todoistDueString ?? '';
+		this.todoistSync = existingTask?.todoistSync ?? true;
+		this.preserveInitialExistingValues = Boolean(existingTask);
 	}
 
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		this.setTitle('Create task note');
+		const isEditMode = Boolean(this.existingTask);
+		this.setTitle(isEditMode ? 'Edit task note' : 'Create task note');
 
 		new Setting(contentEl)
 			.setName('Title')
@@ -197,8 +225,8 @@ export class CreateTaskModal extends Modal {
 
 		new Setting(contentEl)
 			.addButton((button) => {
-				button.setButtonText('Create task').setCta().onClick(async () => {
-					await this.handleCreate();
+				button.setButtonText(isEditMode ? 'Save task' : 'Create task').setCta().onClick(async () => {
+					await this.handleSubmit();
 				});
 			})
 			.addExtraButton((button) => {
@@ -233,7 +261,7 @@ export class CreateTaskModal extends Modal {
 		this.contentEl.empty();
 	}
 
-	private async handleCreate(): Promise<void> {
+	private async handleSubmit(): Promise<void> {
 		const dueOverride = this.todoistDueDate.trim();
 		const recurrenceOverride = this.todoistRecurrence.trim();
 		const parsed = parseInlineTaskDirectives(this.title);
@@ -248,6 +276,24 @@ export class CreateTaskModal extends Modal {
 
 		if (!finalTitle) {
 			new Notice('Task title is required.', 4000);
+			return;
+		}
+
+		if (this.existingTask) {
+			const updatedFile = await this.plugin.updateTaskNote(this.existingTask.file, {
+				title: finalTitle,
+				description: this.description,
+				parentTaskLink: this.parentTaskLink,
+				todoistSync: this.todoistSync,
+				todoistProjectId: enforcedProjectId,
+				todoistProjectName: enforcedProjectName,
+				todoistSectionId: enforcedSectionId,
+				todoistSectionName: enforcedSectionName,
+				todoistDueDate: finalDueDate,
+				todoistDueString: finalRecurrence,
+			});
+			new Notice(`Updated task note: ${updatedFile.basename}`, 5000);
+			this.close();
 			return;
 		}
 
@@ -302,6 +348,11 @@ export class CreateTaskModal extends Modal {
 	}
 
 	private applyParsedFieldSuggestions(): void {
+		if (this.preserveInitialExistingValues) {
+			this.preserveInitialExistingValues = false;
+			return;
+		}
+
 		const parsed = parseInlineTaskDirectives(this.title);
 		const parsedRecurrence = parsed.recurrenceRaw?.trim() ?? '';
 		const parsedDueDate = parsed.dueRaw?.trim() ?? '';
@@ -436,6 +487,9 @@ export class CreateTaskModal extends Modal {
 			file.path === taskFolder || file.path.startsWith(taskPrefix),
 		);
 		for (const file of files) {
+			if (this.existingTask && file.path === this.existingTask.file.path) {
+				continue;
+			}
 			if (!this.isTopLevelTask(file)) {
 				continue;
 			}

@@ -9,6 +9,7 @@ Sync Todoist tasks with task notes in Obsidian, with two-way status updates and 
 - Supports inline checklist conversion to task notes.
 - Keeps linked checklist checkboxes in sync with task note status.
 - Supports due dates and recurring rules.
+- Supports opening the task modal from linked task references via double-click.
 - Stores Todoist API token in Obsidian secret storage.
 
 ## Frontmatter model
@@ -23,7 +24,7 @@ Task notes use these core fields:
 - `todoist_id`
 - `todoist_project_name`
 - `todoist_section_name`
-- `todoist_due` (date value)
+- `todoist_due` (ISO date string, for example `"2026-03-10"`)
 - `todoist_due_string` (natural-language due rule, including recurrence)
 - `todoist_is_recurring` (boolean)
 - `parent_task` (optional wiki-link to parent task)
@@ -73,10 +74,13 @@ Example:
 - [ ] Daily standup recur::"every weekday"
 ```
 
+After conversion, double-click the linked task in a note or Base to open the task modal pre-populated for editing. Single click still opens the task note normally.
+
 ## Sync behavior notes
 
 - Local edits in task notes are marked `todoist_sync_status: dirty_local` and pushed on next sync.
 - Editing `task_done` in Bases is supported and syncs to Todoist.
+- Editing `todoist_due` locally is supported. Keep it as an ISO date string such as `"2026-03-10"`.
 - Clearing `todoist_due` locally is synced (remote due is cleared).
 - Recurring tasks are represented by `todoist_is_recurring` and `todoist_due_string`.
 
