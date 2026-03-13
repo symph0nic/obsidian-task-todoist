@@ -1,4 +1,4 @@
-import { App, TFile, normalizePath } from 'obsidian';
+import { App, TFile, getFrontMatterInfo, normalizePath, parseYaml } from 'obsidian';
 import type { ArchiveMode, TaskTodoistSettings } from './settings';
 import type { TodoistItem } from './todoist-client';
 import {
@@ -210,7 +210,7 @@ export class TaskNoteRepository {
 				continue;
 			}
 
-			const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+			const { content: fullContent, frontmatter } = await this.readFileFrontmatter(file);
 			if (!frontmatter) {
 				continue;
 			}
@@ -226,7 +226,6 @@ export class TaskNoteRepository {
 				continue;
 			}
 
-			const fullContent = await this.app.vault.cachedRead(file);
 			const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
 			const isDone = getTaskStatus(frontmatter) === 'done';
 			const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
@@ -268,6 +267,7 @@ export class TaskNoteRepository {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			const data = frontmatter as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
+			setTaskStatus(data, getTaskStatus(data));
 			data.todoist_id = todoistId;
 			data.todoist_sync_status = 'synced';
 			data.todoist_last_synced_signature = syncSignature;
@@ -286,7 +286,7 @@ export class TaskNoteRepository {
 				continue;
 			}
 
-			const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+			const { content: fullContent, frontmatter } = await this.readFileFrontmatter(file);
 			if (!frontmatter) {
 				continue;
 			}
@@ -311,7 +311,6 @@ export class TaskNoteRepository {
 
 			const isDone = getTaskStatus(frontmatter) === 'done';
 			const isRecurring = frontmatter.todoist_is_recurring === true || frontmatter.todoist_is_recurring === 'true';
-			const fullContent = await this.app.vault.cachedRead(file);
 			const description = fullContent.replace(/^---[\s\S]*?---\n?/, '').trim();
 			const dueDate = toOptionalString(frontmatter.todoist_due);
 			const dueString = toOptionalString(frontmatter.todoist_due_string);
@@ -333,6 +332,7 @@ export class TaskNoteRepository {
 				await this.app.fileManager.processFrontMatter(file, (dirtyFrontmatter) => {
 					const data = dirtyFrontmatter as Record<string, unknown>;
 					applyStandardTaskFrontmatter(data, this.settings);
+					setTaskStatus(data, getTaskStatus(data));
 					data.todoist_sync_status = 'synced';
 					if ('sync_status' in data) {
 						delete data.sync_status;
@@ -365,6 +365,7 @@ export class TaskNoteRepository {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			const data = frontmatter as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
+			setTaskStatus(data, getTaskStatus(data));
 			data.todoist_sync_status = 'synced';
 			data.todoist_last_synced_signature = syncSignature;
 			if ('sync_status' in data) {
@@ -557,6 +558,28 @@ export class TaskNoteRepository {
 		return match?.[1]?.trim() ?? null;
 	}
 
+	private async readFileFrontmatter(file: TFile): Promise<{
+		content: string;
+		frontmatter: Record<string, unknown> | null;
+	}> {
+		const content = await this.app.vault.cachedRead(file);
+		const parsedFrontmatter = parseFrontmatterFromContent(content);
+		const cachedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		if (parsedFrontmatter && cachedFrontmatter) {
+			return {
+				content,
+				frontmatter: {
+					...cachedFrontmatter,
+					...parsedFrontmatter,
+				},
+			};
+		}
+		return {
+			content,
+			frontmatter: parsedFrontmatter ?? cachedFrontmatter ?? null,
+		};
+	}
+
 	private async ensureFolderExists(folderPath: string): Promise<void> {
 		const normalized = normalizePath(folderPath);
 		if (!normalized) {
@@ -661,6 +684,18 @@ function buildNewFileContent(
 		'',
 	];
 	return yaml.join('\n');
+}
+
+function parseFrontmatterFromContent(content: string): Record<string, unknown> | null {
+	const frontmatterInfo = getFrontMatterInfo(content);
+	if (!frontmatterInfo.exists || frontmatterInfo.frontmatter.trim() === '') {
+		return null;
+	}
+	const parsed = parseYaml(frontmatterInfo.frontmatter);
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return null;
+	}
+	return parsed as Record<string, unknown>;
 }
 
 function toWikiLink(filePath: string): string {
