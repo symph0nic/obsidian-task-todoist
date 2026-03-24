@@ -9,7 +9,8 @@ export interface TaskTodoistSettings {
 	autoRenameTaskFiles: boolean;
 	autoSyncEnabled: boolean;
 	autoSyncIntervalMinutes: number;
-	showScheduledSyncNotices: boolean;
+	showSyncNotices: boolean;
+	showStatusBarSyncStatus: boolean;
 	archiveMode: ArchiveMode;
 	archiveFolderPath: string;
 	autoImportEnabled: boolean;
@@ -26,7 +27,8 @@ export const DEFAULT_SETTINGS: TaskTodoistSettings = {
 	autoRenameTaskFiles: true,
 	autoSyncEnabled: true,
 	autoSyncIntervalMinutes: 5,
-	showScheduledSyncNotices: false,
+	showSyncNotices: true,
+	showStatusBarSyncStatus: true,
 	archiveMode: 'move-to-archive-folder',
 	archiveFolderPath: 'Tasks/_archive',
 	autoImportEnabled: true,

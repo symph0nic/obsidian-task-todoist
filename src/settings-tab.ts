@@ -239,11 +239,22 @@ export class TaskTodoistSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName('Show scheduled sync notices')
-			.setDesc('Show a notice after each automatic sync run.')
+			.setName('Show sync notices')
+			.setDesc('Show a notice after manual and automatic sync runs.')
 			.addToggle((toggle) => {
-				toggle.setValue(this.plugin.settings.showScheduledSyncNotices).onChange(async (value) => {
-					this.plugin.settings.showScheduledSyncNotices = value;
+				toggle.setValue(this.plugin.settings.showSyncNotices).onChange(async (value) => {
+					this.plugin.settings.showSyncNotices = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Show status bar sync status')
+			.setDesc('Show Todoist sync state in the status bar with the last result as a tooltip.')
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.showStatusBarSyncStatus).onChange(async (value) => {
+					this.plugin.settings.showStatusBarSyncStatus = value;
+					this.plugin.configureSyncStatusBar();
 					await this.plugin.saveSettings();
 				});
 			});

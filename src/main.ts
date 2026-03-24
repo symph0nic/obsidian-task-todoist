@@ -29,6 +29,8 @@ export default class TaskTodoistPlugin extends Plugin {
 	private scheduledSyncIntervalId: number | null = null;
 	private syncInProgress = false;
 	private syncQueued = false;
+	private lastSyncOk: boolean | null = null;
+	private syncStatusBarEl: HTMLElement | null = null;
 	private lookupCache: { expiresAt: number; value: TodoistProjectSectionLookup } | null = null;
 	private pendingTaskLinkInteraction: { linkTarget: string; sourcePath: string; timeoutId: number } | null = null;
 	private static readonly UNCHECKED_TASK_LINE_REGEX = /^(\s*[-*+]\s+\[\s\]\s+)(.+)$/;
@@ -44,11 +46,17 @@ export default class TaskTodoistPlugin extends Plugin {
 		registerInlineTaskConverter(this);
 		this.registerEditorExtension(createTaskConvertOverlayExtension(this));
 		this.configureScheduledSync();
+		this.configureSyncStatusBar();
 	}
 
 	async loadSettings(): Promise<void> {
-		const loaded = await this.loadData() as Partial<TaskTodoistSettings> | null;
+		const loaded = await this.loadData() as (Partial<TaskTodoistSettings> & {
+			showScheduledSyncNotices?: boolean;
+		}) | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+		if (typeof loaded?.showScheduledSyncNotices === 'boolean' && typeof loaded.showSyncNotices !== 'boolean') {
+			this.settings.showSyncNotices = loaded.showScheduledSyncNotices;
+		}
 	}
 
 	async saveSettings(): Promise<void> {
@@ -128,11 +136,12 @@ export default class TaskTodoistPlugin extends Plugin {
 		}
 
 		this.syncInProgress = true;
+		this.updateSyncStatusBar();
 		await this.loadTodoistApiToken();
 		const token = this.todoistApiToken;
 		if (!token) {
 			const result = { ok: false, message: 'No todoist API token is configured.' };
-			this.setLastSync(result.message);
+			this.setLastSync(result.message, result.ok);
 			this.finishSyncRun();
 			return result;
 		}
@@ -140,7 +149,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		try {
 			const service = new SyncService(this.app, this.settings, token);
 			const result = await service.runImportSync();
-			this.setLastSync(result.message);
+			this.setLastSync(result.message, result.ok);
 			return result;
 		} finally {
 			this.finishSyncRun();
@@ -431,6 +440,20 @@ export default class TaskTodoistPlugin extends Plugin {
 		this.configureScheduledSync();
 	}
 
+	configureSyncStatusBar(): void {
+		if (!this.settings.showStatusBarSyncStatus) {
+			this.syncStatusBarEl?.remove();
+			this.syncStatusBarEl = null;
+			return;
+		}
+
+		if (!this.syncStatusBarEl) {
+			this.syncStatusBarEl = this.addStatusBarItem();
+		}
+
+		this.updateSyncStatusBar();
+	}
+
 	private async loadTodoistApiToken(): Promise<void> {
 		const secretName = this.settings.todoistTokenSecretName.trim();
 		if (!secretName) {
@@ -457,8 +480,7 @@ export default class TaskTodoistPlugin extends Plugin {
 			name: 'Sync todoist now',
 			callback: async () => {
 				const result = await this.runImportSync();
-				const prefix = result.ok ? 'Success:' : 'Failed:';
-				new Notice(`${prefix} ${result.message}`, 8000);
+				this.maybeShowSyncNotice(result, 'Success:', 'Failed:', 8000);
 			},
 		});
 		this.addCommand({
@@ -484,9 +506,11 @@ export default class TaskTodoistPlugin extends Plugin {
 		this.lastConnectionCheckMessage = `${message} (${checkedAt})`;
 	}
 
-	private setLastSync(message: string): void {
+	private setLastSync(message: string, ok: boolean): void {
 		const syncedAt = new Date().toLocaleString();
 		this.lastSyncMessage = `${message} (${syncedAt})`;
+		this.lastSyncOk = ok;
+		this.updateSyncStatusBar();
 	}
 
 	private configureScheduledSync(): void {
@@ -512,23 +536,50 @@ export default class TaskTodoistPlugin extends Plugin {
 			return;
 		}
 
-		if (this.settings.showScheduledSyncNotices) {
-			const prefix = result.ok ? 'Scheduled sync:' : 'Scheduled sync failed:';
-			new Notice(`${prefix} ${result.message}`, result.ok ? 3500 : 5000);
-			return;
-		}
-
-		if (!result.ok) {
-			new Notice(`Scheduled sync failed: ${result.message}`, 5000);
-		}
+		this.maybeShowSyncNotice(result, 'Scheduled sync:', 'Scheduled sync failed:', result.ok ? 3500 : 5000);
 	}
 
 	private finishSyncRun(): void {
 		this.syncInProgress = false;
+		this.updateSyncStatusBar();
 		if (this.syncQueued) {
 			this.syncQueued = false;
 			void this.runImportSync();
 		}
+	}
+
+	private maybeShowSyncNotice(
+		result: { ok: boolean; message: string },
+		successPrefix: string,
+		failurePrefix: string,
+		timeout: number,
+	): void {
+		if (!this.settings.showSyncNotices) {
+			return;
+		}
+		const prefix = result.ok ? successPrefix : failurePrefix;
+		new Notice(`${prefix} ${result.message}`, timeout);
+	}
+
+	private updateSyncStatusBar(): void {
+		if (!this.syncStatusBarEl) {
+			return;
+		}
+
+		let text = 'Todoist: idle';
+		let tooltip = this.lastSyncMessage;
+
+		if (this.syncInProgress) {
+			text = 'Todoist: syncing...';
+			tooltip = 'Todoist sync in progress.';
+		} else if (this.lastSyncOk === true) {
+			text = 'Todoist: synced';
+		} else if (this.lastSyncOk === false) {
+			text = 'Todoist: error';
+		}
+
+		this.syncStatusBarEl.setText(text);
+		this.syncStatusBarEl.title = tooltip;
 	}
 
 	private registerVaultTaskDirtyTracking(): void {
