@@ -204,8 +204,7 @@ export class TaskTodoistSettingTab extends PluginSettingTab {
 			.addButton((button) => {
 				button.setButtonText('Sync now').onClick(async () => {
 					const result = await this.plugin.runImportSync();
-					const prefix = result.ok ? 'Success:' : 'Failed:';
-					new Notice(`${prefix} ${result.message}`, 8000);
+					this.plugin.maybeShowSyncNotice(result, 'Success:', 'Failed:', 8000);
 					this.display();
 				});
 			});

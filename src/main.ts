@@ -548,7 +548,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		}
 	}
 
-	private maybeShowSyncNotice(
+	maybeShowSyncNotice(
 		result: { ok: boolean; message: string },
 		successPrefix: string,
 		failurePrefix: string,
