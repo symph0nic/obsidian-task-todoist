@@ -13,6 +13,7 @@ import { registerInlineTaskConverter } from './inline-task-converter';
 import { createTaskConvertOverlayExtension } from './editor-task-convert-overlay';
 import { formatDueForDisplay, parseInlineTaskDirectives } from './task-directives';
 import { applyStandardTaskFrontmatter, setTaskStatus, setTaskTitle, touchModifiedDate } from './task-frontmatter';
+import { TaskLinkSuggestModal } from './task-link-suggest-modal';
 
 export default class TaskTodoistPlugin extends Plugin {
 	settings: TaskTodoistSettings;
@@ -488,6 +489,13 @@ export default class TaskTodoistPlugin extends Plugin {
 			name: 'Create task note',
 			callback: () => {
 				this.openCreateTaskModal();
+			},
+		});
+		this.addCommand({
+			id: 'insert-task-note-link',
+			name: 'Insert task note at cursor',
+			editorCallback: (editor) => {
+				new TaskLinkSuggestModal(this, editor).open();
 			},
 		});
 		this.addCommand({
