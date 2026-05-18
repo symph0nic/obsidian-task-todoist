@@ -785,7 +785,7 @@ export default class TaskTodoistPlugin extends Plugin {
 		if (!frontmatterInfo.exists || frontmatterInfo.frontmatter.trim() === '') {
 			return null;
 		}
-		const parsed = parseYaml(frontmatterInfo.frontmatter);
+		const parsed: unknown = parseYaml(frontmatterInfo.frontmatter);
 		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
 			return null;
 		}

@@ -263,12 +263,23 @@ export class TaskNoteRepository {
 		return pending;
 	}
 
-	async markLocalCreateSynced(file: TFile, todoistId: string, syncSignature: string): Promise<void> {
+	async markLocalCreateSynced(
+		file: TFile,
+		todoistId: string,
+		syncSignature: string,
+		project?: { id?: string; name?: string },
+	): Promise<void> {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			const data = frontmatter as Record<string, unknown>;
 			applyStandardTaskFrontmatter(data, this.settings);
 			setTaskStatus(data, getTaskStatus(data));
 			data.todoist_id = todoistId;
+			if (project?.id?.trim()) {
+				data.todoist_project_id = project.id.trim();
+			}
+			if (project?.name?.trim()) {
+				data.todoist_project_name = project.name.trim();
+			}
 			data.todoist_sync_status = 'synced';
 			data.todoist_last_synced_signature = syncSignature;
 			if ('sync_status' in data) {
@@ -691,7 +702,7 @@ function parseFrontmatterFromContent(content: string): Record<string, unknown> |
 	if (!frontmatterInfo.exists || frontmatterInfo.frontmatter.trim() === '') {
 		return null;
 	}
-	const parsed = parseYaml(frontmatterInfo.frontmatter);
+	const parsed: unknown = parseYaml(frontmatterInfo.frontmatter);
 	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return null;
 	}

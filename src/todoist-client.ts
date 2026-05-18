@@ -189,6 +189,45 @@ export class TodoistClient {
 		return mappedId;
 	}
 
+	async createProject(name: string): Promise<string> {
+		const trimmedName = name.trim();
+		if (!trimmedName) {
+			throw new Error('Todoist project name is required.');
+		}
+
+		const commandUuid = generateUuid();
+		const tempId = generateUuid();
+		const response = await this.syncWithCommands([
+			{
+				type: 'project_add',
+				uuid: commandUuid,
+				temp_id: tempId,
+				args: {
+					name: trimmedName,
+				},
+			},
+		], ['projects']);
+
+		if (response.status === 401) {
+			throw new Error('Todoist authentication failed. Check your token.');
+		}
+		if (response.status !== 200) {
+			throw new Error(`Todoist create project failed with status ${response.status}.`);
+		}
+
+		const payload = response.json as TodoistSyncResponse;
+		const status = payload.sync_status?.[commandUuid];
+		if (status !== 'ok') {
+			throw new Error('Todoist did not accept the create project command.');
+		}
+
+		const mappedId = payload.temp_id_mapping?.[tempId];
+		if (!mappedId) {
+			throw new Error('Todoist create project response did not include a project ID.');
+		}
+		return mappedId;
+	}
+
 	async updateTask(input: TodoistTaskUpdateInput): Promise<void> {
 		const commands = [];
 		const updateCommandId = generateUuid();
@@ -241,10 +280,10 @@ export class TodoistClient {
 		});
 	}
 
-	private async syncWithCommands(commands: unknown[]) {
+	private async syncWithCommands(commands: unknown[], resourceTypes = ['items']) {
 		return this.syncWithBody({
 			sync_token: '*',
-			resource_types: '["items"]',
+			resource_types: JSON.stringify(resourceTypes),
 			commands: JSON.stringify(commands),
 		});
 	}

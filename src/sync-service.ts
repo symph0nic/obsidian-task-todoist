@@ -38,7 +38,12 @@ export class SyncService {
 
 			const pendingLocalCreates = await repository.listPendingLocalCreates();
 			for (const pending of pendingLocalCreates) {
-				const resolvedProjectId = resolveProjectId(pending.projectId, pending.projectName, projectIdByName);
+				const resolvedProjectId = await resolveOrCreateProjectId(
+					pending.projectId,
+					pending.projectName,
+					projectIdByName,
+					todoistClient,
+				);
 				const resolvedSectionId = resolveSectionId(
 					pending.sectionId,
 					pending.sectionName,
@@ -69,7 +74,12 @@ export class SyncService {
 						dueString,
 					});
 				}
-				await repository.markLocalCreateSynced(pending.file, createdTodoistId, pending.syncSignature);
+				await repository.markLocalCreateSynced(
+					pending.file,
+					createdTodoistId,
+					pending.syncSignature,
+					{ id: resolvedProjectId, name: pending.projectName },
+				);
 			}
 
 			const pendingLocalUpdates = await repository.listPendingLocalUpdates();
@@ -183,6 +193,31 @@ function includeAncestorTasks(
 	}
 
 	return Array.from(selectedById.values());
+}
+
+async function resolveOrCreateProjectId(
+	projectId: string | undefined,
+	projectName: string | undefined,
+	projectIdByName: Map<string, string>,
+	todoistClient: Pick<TodoistClient, 'createProject'>,
+): Promise<string | undefined> {
+	if (projectId?.trim()) {
+		return projectId.trim();
+	}
+	const normalizedProjectName = projectName?.trim();
+	if (!normalizedProjectName) {
+		return undefined;
+	}
+	const existingProjectId = projectIdByName.get(normalizedProjectName.toLowerCase());
+	if (existingProjectId) {
+		return existingProjectId;
+	}
+	if (normalizedProjectName.toLowerCase() === 'inbox') {
+		return undefined;
+	}
+	const createdProjectId = await todoistClient.createProject(normalizedProjectName);
+	projectIdByName.set(normalizedProjectName.toLowerCase(), createdProjectId);
+	return createdProjectId;
 }
 
 function resolveProjectId(

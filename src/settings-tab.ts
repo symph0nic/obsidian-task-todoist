@@ -249,7 +249,7 @@ export class TaskTodoistSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Show status bar sync status')
-			.setDesc('Show Todoist sync state in the status bar with the last result as a tooltip.')
+			.setDesc('Show sync state in the status bar with the last result as a tooltip.')
 			.addToggle((toggle) => {
 				toggle.setValue(this.plugin.settings.showStatusBarSyncStatus).onChange(async (value) => {
 					this.plugin.settings.showStatusBarSyncStatus = value;
